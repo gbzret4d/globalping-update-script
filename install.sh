@@ -23,6 +23,9 @@ get_system_info() {
     OS_INFO=$(lsb_release -ds 2>/dev/null || echo "UNKNOWN")
     KERNEL=$(uname -r || echo "UNKNOWN")
     UPTIME=$(uptime -p | sed 's/up //' || echo "UNKNOWN")
+    DISK_SPACE=$(df -h / | awk 'NR==2 {print $4}' || echo "UNKNOWN")
+    MEMORY=$(free -m | awk 'NR==2 {print $4}' || echo "UNKNOWN")
+    CPU_INFO=$(lscpu | grep "Model name" | cut -d':' -f2 | xargs || echo "UNKNOWN")
 }
 
 # ==============================================
@@ -37,26 +40,11 @@ notify() {
     local message=$2
 
     case $level in
-        "error")
-            local emoji="❌"
-            local title="Fehler im Skript"
-            ;;
-        "warning")
-            local emoji="⚠️"
-            local title="Warnung"
-            ;;
-        "success")
-            local emoji="✅"
-            local title="Erfolgreich"
-            ;;
-        "info")
-            local emoji="ℹ️"
-            local title="Information"
-            ;;
-        *)
-            local emoji="🔔"
-            local title="Benachrichtigung"
-            ;;
+        "error") emoji="❌"; title="Fehler im Skript" ;;
+        "warning") emoji="⚠️"; title="Warnung" ;;
+        "success") emoji="✅"; title="Erfolgreich" ;;
+        "info") emoji="ℹ️"; title="Information" ;;
+        *) emoji="🔔"; title="Benachrichtigung" ;;
     esac
 
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT" ]; then
@@ -69,7 +57,10 @@ notify() {
 💻 OS: $OS_INFO
 🐧 Kernel: $KERNEL
 ⏱️ Uptime: $UPTIME
-🔧 $message"
+💾 Disk: $DISK_SPACE frei
+🧠 RAM: $MEMORY MB frei
+⚡ CPU: $CPU_INFO
+🔧 Details: $message"
 
         curl -s -X POST "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT}" \
@@ -125,7 +116,7 @@ install_dependencies() {
         curl wget jq apt-transport-https
         ca-certificates software-properties-common
         gnupg2 lsb-release unattended-upgrades
-        net-tools docker.io docker-compose
+        net-tools
     )
 
     for pkg in "${dependencies[@]}"; do
@@ -134,6 +125,55 @@ install_dependencies() {
             apt-get install -y "$pkg" | tee -a "$LOG_FILE"
         fi
     done
+
+    install_docker
+}
+
+install_docker() {
+    if ! command -v docker &>/dev/null; then
+        log "Vorbereitung der Docker-Installation"
+
+        # Bereinige vorhandene Docker-Installationen
+        if dpkg -l | grep -qE 'docker|containerd'; then
+            log "Entferne vorhandene Docker-Pakete"
+            apt-get remove -y docker docker-engine docker.io containerd runc || true
+            apt-get autoremove -y | tee -a "$LOG_FILE"
+            rm -rf /var/lib/docker /etc/docker
+        fi
+
+        # Offizielle Docker-Installation
+        log "Füge Docker-Repository hinzu"
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update -y | tee -a "$LOG_FILE"
+
+        log "Installiere Docker-Pakete"
+        apt-get install -y \
+            docker-ce \
+            docker-ce-cli \
+            containerd.io \
+            docker-buildx-plugin \
+            docker-compose-plugin | tee -a "$LOG_FILE"
+
+        # Docker konfigurieren
+        log "Konfiguriere Docker-Dienst"
+        systemctl enable --now docker | tee -a "$LOG_FILE"
+        usermod -aG docker "$USER" || true
+
+        # Installation verifizieren
+        if docker --version &>/dev/null; then
+            log "Docker erfolgreich installiert: $(docker --version)"
+            notify "success" "Docker installiert: $(docker --version)"
+        else
+            log "FEHLER: Docker-Installation fehlgeschlagen"
+            notify "error" "Docker-Installation fehlgeschlagen"
+            exit 1
+        fi
+    else
+        log "Docker ist bereits installiert: $(docker --version)"
+    fi
 }
 
 # ==============================================
@@ -145,7 +185,7 @@ configure_firewall() {
         ufw allow ssh | tee -a "$LOG_FILE"
         ufw allow 80/tcp | tee -a "$LOG_FILE"
         ufw allow 443/tcp | tee -a "$LOG_FILE"
-        ufw --force enable | tee -a "$LOG_FILE"
+        echo "y" | ufw enable | tee -a "$LOG_FILE"
     fi
 }
 
@@ -154,15 +194,24 @@ configure_ssh() {
         log "Konfiguriere SSH-Zugang"
 
         mkdir -p "$SSH_DIR"
-        echo "$SSH_KEY" >> "$SSH_DIR/authorized_keys"
+        touch "$SSH_DIR/authorized_keys"
+        chmod 700 "$SSH_DIR"
         chmod 600 "$SSH_DIR/authorized_keys"
 
+        # Füge SSH-Key hinzu wenn nicht vorhanden
+        if ! grep -q "$SSH_KEY" "$SSH_DIR/authorized_keys"; then
+            echo "$SSH_KEY" >> "$SSH_DIR/authorized_keys"
+        fi
+
         # SSH Hardening
+        log "Härte SSH-Konfiguration"
         sed -i 's/^#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
         sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
         sed -i 's/^#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+        sed -i 's/^#ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 
         systemctl restart sshd | tee -a "$LOG_FILE"
+        notify "success" "SSH erfolgreich konfiguriert"
     fi
 }
 
@@ -222,12 +271,14 @@ install_globalping() {
         ghcr.io/jsdelivr/globalping-probe | tee -a "$LOG_FILE"
 
     # Überprüfung
-    sleep 5
+    sleep 10
     if docker ps | grep -q globalping-probe; then
-        log "Globalping Probe erfolgreich installiert"
-        notify "success" "Globalping Probe läuft (Version: $(docker inspect globalping-probe --format '{{.Config.Image}}'))"
+        local probe_version=$(docker inspect globalping-probe --format '{{.Config.Image}}')
+        log "Globalping Probe erfolgreich installiert (Version: $probe_version)"
+        notify "success" "Globalping Probe läuft (Version: $probe_version)"
     else
         log "FEHLER: Globalping Probe start fehlgeschlagen"
+        docker logs globalping-probe | tee -a "$LOG_FILE"
         notify "error" "Globalping Probe konnte nicht gestartet werden"
         exit 1
     fi
@@ -238,9 +289,15 @@ setup_cron_job() {
 
     cat > /usr/local/bin/globalping-maintenance << 'EOF'
 #!/bin/bash
-docker pull ghcr.io/jsdelivr/globalping-probe:latest
-docker stop globalping-probe
-docker rm globalping-probe
+LOG="/var/log/globalping-maintenance.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starte Wartung" >> $LOG
+
+# Docker-Images aktualisieren
+docker pull ghcr.io/jsdelivr/globalping-probe:latest 2>&1 >> $LOG
+
+# Container neustarten
+docker stop globalping-probe 2>&1 >> $LOG
+docker rm globalping-probe 2>&1 >> $LOG
 docker run -d \
     --name globalping-probe \
     --restart always \
@@ -248,15 +305,21 @@ docker run -d \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
     -e ADOPTION_TOKEN="YOUR_TOKEN" \
-    ghcr.io/jsdelivr/globalping-probe
+    ghcr.io/jsdelivr/globalping-probe 2>&1 >> $LOG
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wartung abgeschlossen" >> $LOG
 EOF
 
     chmod +x /usr/local/bin/globalping-maintenance
+    sed -i "s/YOUR_TOKEN/$ADOPTION_TOKEN/" /usr/local/bin/globalping-maintenance
+
     (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+    log "Cron-Job erfolgreich eingerichtet"
+    notify "info" "Automatische Wartung eingerichtet (täglich 3 Uhr)"
 }
 
 # ==============================================
-# SYSTEMOPTIMIERUNGEN
+# SYSTEMUPDATE & BEREINIGUNG
 # ==============================================
 system_update() {
     log "Starte vollständiges Systemupdate"
@@ -267,32 +330,6 @@ system_update() {
     unattended-upgrade -d | tee -a "$LOG_FILE"
 
     log "Systemupdate abgeschlossen"
-}
-
-system_optimize() {
-    log "Starte Systemoptimierungen"
-
-    # Kernel Parameter optimieren
-    cat >> /etc/sysctl.conf << EOF
-# Optimierungen für Globalping
-net.core.rmem_max=4194304
-net.core.wmem_max=4194304
-net.ipv4.tcp_rmem=4096 87380 4194304
-net.ipv4.tcp_wmem=4096 65536 4194304
-net.ipv4.tcp_window_scaling=1
-net.ipv4.tcp_timestamps=1
-net.ipv4.tcp_sack=1
-EOF
-
-    sysctl -p | tee -a "$LOG_FILE"
-
-    # SWAP optimieren
-    if [ -f /etc/sysctl.conf ]; then
-        sed -i '/vm.swappiness/d' /etc/sysctl.conf
-        echo "vm.swappiness=10" >> /etc/sysctl.conf
-    fi
-
-    log "Systemoptimierungen abgeschlossen"
 }
 
 system_cleanup() {
@@ -314,6 +351,7 @@ system_cleanup() {
 main() {
     trap 'error_handler $LINENO' ERR
 
+    # Initialisierung
     get_system_info
     create_temp_dir
     check_root
@@ -358,7 +396,6 @@ main() {
     configure_firewall
     configure_ssh
     install_ubuntu_pro
-    system_optimize
     install_globalping
     setup_cron_job
     system_cleanup
