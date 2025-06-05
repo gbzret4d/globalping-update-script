@@ -448,4 +448,153 @@ main() {
 }
 
 main "$@"
+# ==============================================
+# UMFASSENDE DOKUMENTATION & METADATEN
+# ==============================================
+: << 'EOF'
+# GLOBALPING PROBE INSTALLATIONSSKRIPT - KOMPLETTE DOKUMENTATION
 
+## ZWECK & FUNKTIONSWEISE
+Dieses Skript automatisiert die komplette Bereitstellung einer Globalping-Probe als Docker-Container mit allen notwendigen Systemvoraussetzungen. Es implementiert:
+- Sichere Basis-Konfiguration des Hostsystems
+- Automatische Wartungs- und Update-Mechanismen
+- Umfassende Überwachung und Benachrichtigung
+- Selbstheilungsfunktionalitäten für maximale Verfügbarkeit
+
+## KERNKOMPONENTEN
+1. SYSTEMVORAUSSETZUNGEN
+   - Docker Runtime (automatisch installiert)
+   - Zeitsynchronisation (chrony/ntp/systemd-timesyncd)
+   - SSH-Zugang (optional mit Key-basiertem Zugang)
+   - Ubuntu Pro Support (optional)
+
+2. INSTALLATIONSABLAUF
+   - Systemhärtung (SSH, automatische Updates)
+   - Docker-Installation mit offiziellem Repository
+   - Globalping-Container-Deployment
+   - Cron-Job Einrichtung für:
+     * Wöchentliche Container-Updates (+/- 24h Offset)
+     * Skript-Selbstupdates (von GitHub)
+
+3. NOTIFIKATIONSSYSTEM
+   - Telegram-Integration für:
+     * Installationsstatus
+     * Fehlermeldungen
+     * Wartungsaktivitäten
+
+## TECHNISCHE DETAILS
+### AUTO-UPDATE MECHANISMUS
+- Update-Quelle: GitHub Raw Content (${SCRIPT_URL})
+- Prüfrhythmus: Wöchentlich mit zufälligem Zeitoffset
+- Aktualisierungsstrategie:
+  1. SHA256-Checksummenvergleich
+  2. Automatischer Download bei Änderungen
+  3. Neustart mit --resume Parameter
+
+### ZEITSYNCHRONISATION
+- Priorisierte Dienste:
+  1. chrony (falls verfügbar)
+  2. ntp (Fallback)
+  3. systemd-timesyncd (Notfalllösung)
+- Wichtig für zeitgenaue Cron-Job-Ausführung
+
+### SSH-KONFIGURATION
+- Automatische Erkennung laufender Dienste (ssh/sshd)
+- Härtung der Konfiguration:
+  - Deaktivierung von PasswordAuthentication
+  - Root-Login nur mit SSH-Key
+  - Absicherung der Key-Dateiberechtigungen
+
+### FEHLERBEHANDLUNG
+- Drei-Stufen-Error-Handling:
+  1. Lokales Logging (/var/log/globalping-install.log)
+  2. Systemweite Benachrichtigung (Telegram)
+  3. Automatischer Cleanup bei Abbruch
+
+### CRON-JOBS
+1. Wartungsjob (${CRON_JOB}):
+   - Container-Update mit Zufalls-Offset
+   - Neustart der Probe
+   - Logging nach /var/log/globalping-maintenance.log
+
+2. Skript-Update (${AUTO_UPDATE_CRON}):
+   - Wöchentliche Prüfung auf GitHub-Änderungen
+   - Automatische Aktualisierung bei neuen Versionen
+
+## VARIABLEN & KONFIGURATION
+### ERFORDERLICHE PARAMETER
+--adoption-token    : Globalping Adoption Token (MANDATORY)
+--telegram-token   : Bot-Token für Notifications (OPTIONAL)
+--telegram-chat    : Chat-ID für Notifications (OPTIONAL)
+--ubuntu-token     : Ubuntu Pro Token (OPTIONAL)
+--ssh-key          : Public Key für SSH-Zugang (OPTIONAL)
+
+### INTERNE VARIABLEN
+TELEGRAM_API_URL   : Telegram API Endpoint
+TMP_DIR            : Temporäres Arbeitsverzeichnis
+SCRIPT_URL         : Update-Quelladresse (GitHub Raw)
+CRON_JOB           : Wartungsjob-Definition
+
+## SICHERHEITSHINWEISE
+1. TOKEN-SICHERHEIT
+   - Alle Tokens werden als Skriptparameter übergeben
+   - Keine dauerhafte Speicherung in Klartext
+
+2. SYSTEMZUGRIFF
+   - Skript erfordert root-Rechte
+   - Modifiziert Systemdienste (SSH, Docker)
+   - Installiert Systempakete
+
+3. DATENSCHUTZ
+   - IP/Hostname-Informationen werden an Telegram gesendet
+   - Keine sensiblen Systemdaten werden extern übertragen
+
+## TROUBLESHOOTING
+### TYPISCHE FEHLER
+1. DOCKER-PROBLEME
+   - Lösung: System neu starten, /var/lib/docker bereinigen
+
+2. SSH-KONFIGURATION
+   - Lösung: Backup unter /etc/ssh/sshd_config.bak
+
+3. CRON-JOB-FEHLER
+   - Lösung: Manueller Test mit /usr/local/bin/globalping-maintenance
+
+### LOG-ANALYSE
+- Hauptlog: /var/log/globalping-install.log
+- Wartungslog: /var/log/globalping-maintenance.log
+- Docker-Logs: docker logs globalping-probe
+
+## ENTWICKLERHINWEISE
+1. ERWEITERUNGEN
+   - Neue Funktionen sollten error_handler integrieren
+   - Telegram-Notifications für alle kritischen Operationen
+
+2. TESTPROZEDUR
+   - Immer mit --ssh-key testen
+   - Automatische Updates simulieren mit:
+     sha256sum /usr/local/bin/install_globalping.sh > test.hash
+
+3. VERSIONSKONTROLLE
+   - Änderungen im Skript müssen die SHA256-Prüfung berücksichtigen
+   - Update-URL darf nicht ohne Migration geändert werden
+
+## BEISPIELAUFRUFE
+1. KOMPLETTE INSTALLATION:
+   ./install_globalping.sh \
+     --adoption-token "gp_123456" \
+     --ssh-key "ssh-rsa AAAAB3..." \
+     --telegram-token "123:ABC" \
+     --telegram-chat "456"
+
+2. NUR DOCKER & PROBE:
+   ./install_globalping.sh --adoption-token "gp_123456"
+
+3. AUTOUPDATE-TEST:
+   ./install_globalping.sh --auto-update
+
+## ZUKÜNFTIGE ENTWICKLUNG
+- Integration von Health-Checks
+- Support für alternative Container-Runtimes
+- Erweiterte System-Monitoring-Funktionen
+EOF
