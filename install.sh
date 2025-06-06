@@ -263,9 +263,8 @@ check_internet() {
     return 0
 }
 
-# Abhängigkeiten installieren
 install_dependencies() {
-    log "Installiere Systemabhängigkeiten"
+    log "Prüfe Systemabhängigkeiten"
     
     # Erkenne Distribution
     local is_debian_based=false
@@ -277,6 +276,25 @@ install_dependencies() {
         is_rhel_based=true
     fi
     
+    # Liste der zu prüfenden Befehle
+    local required_cmds=("curl" "wget" "grep" "sed" "awk")
+    local missing_cmds=()
+    
+    # Prüfe, welche Befehle fehlen
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" >/dev/null; then
+            missing_cmds+=("$cmd")
+        fi
+    done
+    
+    # Wenn alle Befehle vorhanden sind, überspringe Installation
+    if [ ${#missing_cmds[@]} -eq 0 ]; then
+        log "Alle benötigten Abhängigkeiten sind bereits installiert"
+        return 0
+    fi
+    
+    log "Folgende Abhängigkeiten fehlen: ${missing_cmds[*]}"
+    
     if [ "$is_debian_based" = "true" ] && command -v apt-get >/dev/null; then
         # Debian/Ubuntu
         apt-get update >/dev/null 2>&1 || {
@@ -285,48 +303,17 @@ install_dependencies() {
         apt-get install -y \
             curl wget awk sed grep coreutils \
             lsb-release iproute2 systemd >/dev/null 2>&1 || {
-            log "Fehler: Konnte Abhängigkeiten nicht installieren"
-            return 1
+            # Überprüfe ob die Pakete trotzdem installiert wurden
+            for cmd in "${missing_cmds[@]}"; do
+                if ! command -v "$cmd" >/dev/null; then
+                    log "Fehler: Konnte Abhängigkeit $cmd nicht installieren"
+                    return 1
+                fi
+            done
+            # Wenn wir hier ankommen, wurden alle fehlenden Befehle installiert
+            log "Alle benötigten Abhängigkeiten sind jetzt verfügbar"
+            return 0
         }
-    elif [ "$is_rhel_based" = "true" ]; then
-        if command -v dnf >/dev/null; then
-            # Neuere RHEL-basierte Systeme (Rocky, Alma, Fedora)
-            dnf install -y \
-                curl wget gawk sed grep coreutils \
-                redhat-lsb-core iproute >/dev/null 2>&1 || {
-                log "Fehler: Konnte Abhängigkeiten nicht installieren"
-                return 1
-            }
-        elif command -v yum >/dev/null; then
-            # Ältere RHEL-basierte Systeme
-            yum install -y \
-                curl wget gawk sed grep coreutils \
-                redhat-lsb-core iproute >/dev/null 2>&1 || {
-                log "Fehler: Konnte Abhängigkeiten nicht installieren"
-                return 1
-            }
-        else
-            log "Kein unterstützter Paketmanager auf RHEL-basiertem System gefunden"
-            return 1
-        fi
-    else
-        log "Kein unterstützter Paketmanager gefunden!"
-        log "Versuche minimale Abhängigkeiten zu prüfen..."
-        
-        # Prüfe minimale Abhängigkeiten
-        for cmd in curl wget grep sed; do
-            if ! command -v $cmd >/dev/null; then
-                log "Kritische Abhängigkeit fehlt: $cmd"
-                return 1
-            fi
-        done
-        
-        log "Minimale Abhängigkeiten vorhanden, fahre fort"
-    fi
-    
-    log "Systemabhängigkeiten erfolgreich installiert oder bereits vorhanden"
-    return 0
-}
 
 # SSH-Schlüssel einrichten
 setup_ssh_key() {
