@@ -116,10 +116,11 @@ manage_hostname() {
             echo "127.0.0.1 localhost $current_hostname" >> /etc/hosts
         fi
 
-        if ! grep -q "::1.*$current_hostname" /etc/hosts; then
+                if ! grep -q "::1.*$current_hostname" /etc/hosts; then
             sed -i "/^::1/s/$/ $current_hostname/" /etc/hosts || \
-            echo "::1 localhost ip6-localhost ip6-loopback $current_hostname" >> /etc/hosts
+            echo "::1 localhost $current_hostname" >> /etc/hosts
         fi
+
     } || {
         log "Fehler: Konnte /etc/hosts nicht aktualisieren"
         notify warn "⚠️ Hostname-Konfiguration fehlgeschlagen"
