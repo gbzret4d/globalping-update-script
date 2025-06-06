@@ -263,6 +263,7 @@ check_internet() {
     return 0
 }
 
+# Abhängigkeiten installieren
 install_dependencies() {
     log "Prüfe Systemabhängigkeiten"
     
@@ -314,6 +315,59 @@ install_dependencies() {
             log "Alle benötigten Abhängigkeiten sind jetzt verfügbar"
             return 0
         }
+    elif [ "$is_rhel_based" = "true" ]; then
+        if command -v dnf >/dev/null; then
+            # Neuere RHEL-basierte Systeme (Rocky, Alma, Fedora)
+            dnf install -y \
+                curl wget gawk sed grep coreutils \
+                redhat-lsb-core iproute >/dev/null 2>&1 || {
+                # Überprüfe nach Installation
+                for cmd in "${missing_cmds[@]}"; do
+                    if ! command -v "$cmd" >/dev/null; then
+                        log "Fehler: Konnte Abhängigkeit $cmd nicht installieren"
+                        return 1
+                    fi
+                done
+                log "Alle benötigten Abhängigkeiten sind jetzt verfügbar"
+                return 0
+            }
+        elif command -v yum >/dev/null; then
+            # Ältere RHEL-basierte Systeme
+            yum install -y \
+                curl wget gawk sed grep coreutils \
+                redhat-lsb-core iproute >/dev/null 2>&1 || {
+                # Überprüfe nach Installation
+                for cmd in "${missing_cmds[@]}"; do
+                    if ! command -v "$cmd" >/dev/null; then
+                        log "Fehler: Konnte Abhängigkeit $cmd nicht installieren"
+                        return 1
+                    fi
+                done
+                log "Alle benötigten Abhängigkeiten sind jetzt verfügbar"
+                return 0
+            }
+        else
+            log "Kein unterstützter Paketmanager auf RHEL-basiertem System gefunden"
+            return 1
+        fi
+    else
+        log "Kein unterstützter Paketmanager gefunden!"
+        log "Versuche minimale Abhängigkeiten zu prüfen..."
+        
+        # Prüfe minimale Abhängigkeiten
+        for cmd in curl wget grep sed; do
+            if ! command -v $cmd >/dev/null; then
+                log "Kritische Abhängigkeit fehlt: $cmd"
+                return 1
+            fi
+        done
+        
+        log "Minimale Abhängigkeiten vorhanden, fahre fort"
+    fi
+    
+    log "Systemabhängigkeiten erfolgreich installiert oder bereits vorhanden"
+    return 0
+}
 
 # SSH-Schlüssel einrichten
 setup_ssh_key() {
