@@ -53,6 +53,54 @@ notify() {
             -d parse_mode="Markdown" >/dev/null 2>&1 || log "Telegram-Benachrichtigung fehlgeschlagen"
     fi
 }
+
+# Sudo installieren
+install_sudo() {
+    log "Prüfe, ob sudo installiert ist..."
+    
+    # Prüfe, ob sudo installiert ist
+    if command -v sudo >/dev/null; then
+        log "sudo ist bereits installiert"
+        return 0
+    fi
+    
+    log "sudo ist nicht installiert. Installiere..."
+    
+    # Installiere sudo je nach Distribution
+    if command -v apt-get >/dev/null; then
+        # Debian/Ubuntu
+        apt-get update >/dev/null 2>&1 || log "Warnung: apt-get update fehlgeschlagen"
+        apt-get install -y sudo >/dev/null 2>&1 || {
+            log "Fehler: Konnte sudo nicht installieren"
+            return 1
+        }
+    elif command -v yum >/dev/null; then
+        # RHEL/CentOS/Rocky/Alma
+        yum install -y sudo >/dev/null 2>&1 || {
+            log "Fehler: Konnte sudo nicht installieren"
+            return 1
+        }
+    elif command -v dnf >/dev/null; then
+        # Fedora/Neuere RHEL-basierte Systeme
+        dnf install -y sudo >/dev/null 2>&1 || {
+            log "Fehler: Konnte sudo nicht installieren"
+            return 1
+        }
+    else
+        log "Kein unterstützter Paketmanager gefunden. Kann sudo nicht installieren."
+        return 1
+    fi
+    
+    # Prüfe, ob sudo jetzt installiert ist
+    if command -v sudo >/dev/null; then
+        log "sudo erfolgreich installiert"
+        return 0
+    else
+        log "Fehler: sudo konnte nicht installiert werden"
+        return 1
+    fi
+}
+
 # Ubuntu Pro Aktivierung
 ubuntu_pro_attach() {
     if [ -n "$UBUNTU_PRO_TOKEN" ] && grep -q "Ubuntu" /etc/os-release; then
@@ -151,8 +199,16 @@ get_system_info() {
     LOAD_AVG=$(cat /proc/loadavg | awk '{print $1", "$2", "$3}')
     SWAP=$(free -m | awk '/Swap/{print $2" MB"}')
 
-    log "Systeminfo: $OS_INFO | $CPU_CORES Cores | $MEMORY MB RAM | $DISK_SPACE frei"
+    # Erkenne Distribution
+    DISTRO="Unbekannt"
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO="$ID $VERSION_ID"
+    fi
+    
+    log "Systeminfo: $DISTRO | $OS_INFO | $CPU_CORES Cores | $MEMORY MB RAM | $DISK_SPACE frei"
 }
+
 # Temporäres Verzeichnis erstellen
 create_temp_dir() {
     mkdir -p "$TMP_DIR" || {
@@ -211,7 +267,18 @@ check_internet() {
 install_dependencies() {
     log "Installiere Systemabhängigkeiten"
     
-    if command -v apt-get >/dev/null; then
+    # Erkenne Distribution
+    local is_debian_based=false
+    local is_rhel_based=false
+    
+    if [ -f /etc/debian_version ] || grep -qi "debian\|ubuntu" /etc/os-release 2>/dev/null; then
+        is_debian_based=true
+    elif grep -qi "rhel\|centos\|fedora\|rocky\|alma" /etc/os-release 2>/dev/null; then
+        is_rhel_based=true
+    fi
+    
+    if [ "$is_debian_based" = "true" ] && command -v apt-get >/dev/null; then
+        # Debian/Ubuntu
         apt-get update >/dev/null 2>&1 || {
             log "Warnung: apt-get update fehlgeschlagen, versuche trotzdem Installation"
         }
@@ -221,20 +288,27 @@ install_dependencies() {
             log "Fehler: Konnte Abhängigkeiten nicht installieren"
             return 1
         }
-    elif command -v yum >/dev/null; then
-        yum install -y \
-            curl wget awk sed grep coreutils \
-            redhat-lsb-systemd iproute >/dev/null 2>&1 || {
-            log "Fehler: Konnte Abhängigkeiten nicht installieren"
+    elif [ "$is_rhel_based" = "true" ]; then
+        if command -v dnf >/dev/null; then
+            # Neuere RHEL-basierte Systeme (Rocky, Alma, Fedora)
+            dnf install -y \
+                curl wget gawk sed grep coreutils \
+                redhat-lsb-core iproute >/dev/null 2>&1 || {
+                log "Fehler: Konnte Abhängigkeiten nicht installieren"
+                return 1
+            }
+        elif command -v yum >/dev/null; then
+            # Ältere RHEL-basierte Systeme
+            yum install -y \
+                curl wget gawk sed grep coreutils \
+                redhat-lsb-core iproute >/dev/null 2>&1 || {
+                log "Fehler: Konnte Abhängigkeiten nicht installieren"
+                return 1
+            }
+        else
+            log "Kein unterstützter Paketmanager auf RHEL-basiertem System gefunden"
             return 1
-        }
-    elif command -v dnf >/dev/null; then
-        dnf install -y \
-            curl wget awk sed grep coreutils \
-            redhat-lsb-systemd iproute >/dev/null 2>&1 || {
-            log "Fehler: Konnte Abhängigkeiten nicht installieren"
-            return 1
-        }
+        fi
     else
         log "Kein unterstützter Paketmanager gefunden!"
         log "Versuche minimale Abhängigkeiten zu prüfen..."
@@ -285,25 +359,40 @@ setup_ssh_key() {
     
     return 0
 }
+
 # Systemaktualisierung
 update_system() {
     log "Führe Systemaktualisierung durch"
     
-    if command -v apt-get >/dev/null; then
+    # Erkenne Distribution
+    local is_debian_based=false
+    local is_rhel_based=false
+    
+    if [ -f /etc/debian_version ] || grep -qi "debian\|ubuntu" /etc/os-release 2>/dev/null; then
+        is_debian_based=true
+    elif grep -qi "rhel\|centos\|fedora\|rocky\|alma" /etc/os-release 2>/dev/null; then
+        is_rhel_based=true
+    fi
+    
+    if [ "$is_debian_based" = "true" ] && command -v apt-get >/dev/null; then
         apt-get update >/dev/null 2>&1 || {
             log "Warnung: apt-get update fehlgeschlagen"
         }
         apt-get upgrade -y >/dev/null 2>&1 || {
             log "Warnung: apt-get upgrade fehlgeschlagen"
         }
-    elif command -v yum >/dev/null; then
-        yum update -y >/dev/null 2>&1 || {
-            log "Warnung: yum update fehlgeschlagen"
-        }
-    elif command -v dnf >/dev/null; then
-        dnf update -y >/dev/null 2>&1 || {
-            log "Warnung: dnf update fehlgeschlagen"
-        }
+    elif [ "$is_rhel_based" = "true" ]; then
+        if command -v dnf >/dev/null; then
+            dnf update -y >/dev/null 2>&1 || {
+                log "Warnung: dnf update fehlgeschlagen"
+            }
+        elif command -v yum >/dev/null; then
+            yum update -y >/dev/null 2>&1 || {
+                log "Warnung: yum update fehlgeschlagen"
+            }
+        else
+            log "Kein unterstützter Paketmanager auf RHEL-basiertem System gefunden"
+        fi
     else
         log "Kein unterstützter Paketmanager gefunden, überspringe Systemaktualisierung"
     fi
@@ -322,8 +411,26 @@ install_docker() {
         return 0
     fi
     
+    # Erkenne Distribution
+    local is_debian_based=false
+    local is_rhel_based=false
+    local distro_id=""
+    local distro_version=""
+    
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        distro_id="$ID"
+        distro_version="$VERSION_ID"
+    fi
+    
+    if [ -f /etc/debian_version ] || [[ "$distro_id" =~ ^(debian|ubuntu)$ ]]; then
+        is_debian_based=true
+    elif [[ "$distro_id" =~ ^(rhel|centos|fedora|rocky|almalinux)$ ]]; then
+        is_rhel_based=true
+    fi
+    
     # Installiere Docker je nach Distribution
-    if command -v apt-get >/dev/null; then
+    if [ "$is_debian_based" = "true" ] && command -v apt-get >/dev/null; then
         # Debian/Ubuntu
         apt-get update >/dev/null 2>&1
         apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release >/dev/null 2>&1
@@ -336,16 +443,36 @@ install_docker() {
         
         apt-get update >/dev/null 2>&1
         apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1
-    elif command -v yum >/dev/null; then
-        # RHEL/CentOS
-        yum install -y yum-utils >/dev/null 2>&1
-        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null 2>&1
-        yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1
-    elif command -v dnf >/dev/null; then
-        # Fedora
-        dnf -y install dnf-plugins-core >/dev/null 2>&1
-        dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo >/dev/null 2>&1
-        dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1
+    elif [ "$is_rhel_based" = "true" ]; then
+        # RHEL-basierte Systeme (RHEL, CentOS, Rocky, Alma)
+        if command -v dnf >/dev/null; then
+            # Neuere RHEL-basierte Systeme
+            dnf -y install dnf-plugins-core >/dev/null 2>&1
+            
+            # Rocky und AlmaLinux verwenden CentOS-Repos
+            if [[ "$distro_id" =~ ^(rocky|almalinux)$ ]]; then
+                dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null 2>&1
+            else
+                dnf config-manager --add-repo https://download.docker.com/linux/$(echo "$distro_id" | tr '[:upper:]' '[:lower:]')/docker-ce.repo >/dev/null 2>&1
+            fi
+            
+            dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1
+        elif command -v yum >/dev/null; then
+            # Ältere RHEL-basierte Systeme
+            yum install -y yum-utils >/dev/null 2>&1
+            
+            # Rocky und AlmaLinux verwenden CentOS-Repos
+            if [[ "$distro_id" =~ ^(rocky|almalinux)$ ]]; then
+                yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null 2>&1
+            else
+                yum-config-manager --add-repo https://download.docker.com/linux/$(echo "$distro_id" | tr '[:upper:]' '[:lower:]')/docker-ce.repo >/dev/null 2>&1
+            fi
+            
+            yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null 2>&1
+        else
+            log "Kein unterstützter Paketmanager auf RHEL-basiertem System gefunden"
+            return 1
+        fi
     else
         # Fallback: Convenience-Skript
         curl -fsSL https://get.docker.com -o get-docker.sh
@@ -396,6 +523,7 @@ install_docker_compose() {
     log "Docker Compose erfolgreich installiert"
     return 0
 }
+
 # Erstelle Hauptfunktion
 main() {
     log "Starte Server-Setup-Skript"
@@ -413,12 +541,22 @@ main() {
     check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
     check_internet || { log "Internetverbindung nicht verfügbar"; exit 1; }
     create_temp_dir
+    
+    # Installiere sudo, falls nicht vorhanden
+    install_sudo || log "Warnung: sudo-Installation fehlgeschlagen"
+    
     install_dependencies || log "Warnung: Installation der Abhängigkeiten fehlgeschlagen"
     update_system || log "Warnung: Systemaktualisierung fehlgeschlagen"
     get_system_info
     manage_hostname || log "Warnung: Hostname-Konfiguration fehlgeschlagen"
     setup_ssh_key || log "Warnung: SSH-Schlüssel-Setup fehlgeschlagen"
-    ubuntu_pro_attach || log "Warnung: Ubuntu Pro Aktivierung fehlgeschlagen"
+    
+    # Aktiviere Ubuntu Pro nur auf Ubuntu-Systemen
+    if grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
+        ubuntu_pro_attach || log "Warnung: Ubuntu Pro Aktivierung fehlgeschlagen"
+    else
+        log "Kein Ubuntu-System erkannt, überspringe Ubuntu Pro Aktivierung"
+    fi
     
     # Installiere Docker und Docker Compose, falls gewünscht
     if [ "$INSTALL_DOCKER" = "true" ]; then
@@ -448,13 +586,19 @@ create_summary() {
         ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | sort
         
         echo -e "\n--- SYSTEMINFO ---"
-        echo "Betriebssystem: $(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')"
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            echo "Distribution: $NAME $VERSION_ID"
+        else
+            echo "Distribution: $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || echo 'Unbekannt')"
+        fi
         echo "Kernel: $(uname -r)"
         echo "CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | sed 's/^[ \t]*//')"
         echo "RAM: $(free -h | grep Mem | awk '{print $2}')"
         echo "Festplatte: $(df -h / | awk 'NR==2 {print $2}')"
         
         echo -e "\n--- INSTALLIERTE DIENSTE ---"
+        echo "sudo: $(if command -v sudo >/dev/null; then echo "Ja ($(sudo --version | head -1))"; else echo "Nein"; fi)"
         echo "Docker: $(if command -v docker >/dev/null; then echo "Ja ($(docker --version))"; else echo "Nein"; fi)"
         echo "Docker Compose: $(if command -v docker-compose >/dev/null; then echo "Ja ($(docker-compose --version))"; else echo "Nein"; fi)"
         
@@ -489,6 +633,11 @@ Optionen:
   -h, --help              Zeigt diese Hilfe an
   -d, --docker            Installiert Docker und Docker Compose
   -l, --log DATEI         Gibt eine alternative Log-Datei an
+  --adoption-token TOKEN  Setzt den Adoption-Token
+  --telegram-token TOKEN  Setzt den Telegram-Bot-Token
+  --telegram-chat ID      Setzt die Telegram-Chat-ID
+  --ubuntu-token TOKEN    Setzt den Ubuntu Pro Token
+  --ssh-key SCHLÜSSEL     Fügt einen SSH-Schlüssel hinzu
 
 Beispiele:
   $0                      Führt Basiseinrichtung aus
@@ -498,6 +647,7 @@ Beispiele:
 EOF
     exit 0
 }
+
 # Verarbeite Kommandozeilenargumente
 process_args() {
     # Standardwerte
@@ -526,6 +676,51 @@ process_args() {
                 # Automatisches Update-Flag
                 AUTO_UPDATE="true"
                 shift
+                ;;
+            --adoption-token)
+                if [ -n "$2" ]; then
+                    ADOPTION_TOKEN="$2"
+                    shift 2
+                else
+                    log "Fehler: --adoption-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --telegram-token)
+                if [ -n "$2" ]; then
+                    TELEGRAM_TOKEN="$2"
+                    shift 2
+                else
+                    log "Fehler: --telegram-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --telegram-chat)
+                if [ -n "$2" ]; then
+                    TELEGRAM_CHAT="$2"
+                    shift 2
+                else
+                    log "Fehler: --telegram-chat benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --ubuntu-token)
+                if [ -n "$2" ]; then
+                    UBUNTU_PRO_TOKEN="$2"
+                    shift 2
+                else
+                    log "Fehler: --ubuntu-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --ssh-key)
+                if [ -n "$2" ]; then
+                    SSH_KEY="$2"
+                    shift 2
+                else
+                    log "Fehler: --ssh-key benötigt einen Wert"
+                    exit 1
+                fi
                 ;;
             *)
                 log "Unbekannte Option: $1"
