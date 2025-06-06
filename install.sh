@@ -22,7 +22,7 @@ AUTO_UPDATE_CRON="0 0 * * 0 /usr/local/bin/install_globalping.sh --auto-update"
 error_handler() {
     local line=$1
     log "KRITISCHER FEHLER in Zeile $line"
-    notify error "❌ Installation fehlgeschlagen in Zeile $line"
+    notify error "âŒ Installation fehlgeschlagen in Zeile $line"
     exit 1
 }
 
@@ -39,11 +39,11 @@ notify() {
     local title=""
 
     case $level in
-        info) emoji="🔔"; title="Benachrichtigung" ;;
-        warn) emoji="⚠️"; title="Warnung" ;;
-        error) emoji="❌"; title="Fehler" ;;
-        success) emoji="✅"; title="Erfolg" ;;
-        *) emoji="ℹ️"; title="Info" ;;
+        info) emoji="ðŸ””"; title="Benachrichtigung" ;;
+        warn) emoji="âš ï¸"; title="Warnung" ;;
+        error) emoji="âŒ"; title="Fehler" ;;
+        success) emoji="âœ…"; title="Erfolg" ;;
+        *) emoji="â„¹ï¸"; title="Info" ;;
     esac
 
     if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT" ]; then
@@ -94,23 +94,24 @@ manage_hostname() {
         log "Warnung: Konnte keine Sicherung von /etc/hosts erstellen"
     }
 
-    # Prüfe, ob die Datei beschreibbar ist
+    # PrÃ¼fe, ob die Datei beschreibbar ist
     if [ ! -w "/etc/hosts" ]; then
-        log "Warnung: /etc/hosts ist nicht beschreibbar, versuche Berechtigungen zu ändern"
+        log "Warnung: /etc/hosts ist nicht beschreibbar, versuche Berechtigungen zu Ã¤ndern"
         chmod u+w /etc/hosts || {
-            log "Fehler: Konnte Berechtigungen für /etc/hosts nicht ändern"
-            notify warn "⚠️ Hostname-Konfiguration fehlgeschlagen"
+            log "Fehler: Konnte Berechtigungen fÃ¼r /etc/hosts nicht Ã¤ndern"
+            notify warn "âš ï¸ Hostname-Konfiguration fehlgeschlagen"
             return 1
         }
     }
+        fi
 
     # Versuche, die Datei zu bearbeiten
     {
-        # Alte Einträge bereinigen (für IPv4 und IPv6)
+        # Alte EintrÃ¤ge bereinigen (fÃ¼r IPv4 und IPv6)
         sed -i "/^127\.0\.0\.1.*$short_hostname/d" /etc/hosts
         sed -i "/^::1.*$short_hostname/d" /etc/hosts
 
-        # Neue Einträge hinzufügen
+        # Neue EintrÃ¤ge hinzufÃ¼gen
         if ! grep -q "127.0.0.1.*$current_hostname" /etc/hosts; then
             sed -i "/^127.0.0.1/s/$/ $current_hostname/" /etc/hosts || \
             echo "127.0.0.1 localhost $current_hostname" >> /etc/hosts
@@ -123,7 +124,7 @@ manage_hostname() {
 
     } || {
         log "Fehler: Konnte /etc/hosts nicht aktualisieren"
-        notify warn "⚠️ Hostname-Konfiguration fehlgeschlagen"
+        notify warn "âš ï¸ Hostname-Konfiguration fehlgeschlagen"
         return 1
     }
 
@@ -153,20 +154,20 @@ get_system_info() {
 
     log "Systeminfo: $OS_INFO | $CPU_CORES Cores | $MEMORY MB RAM | $DISK_SPACE frei"
 }
-# Temporäres Verzeichnis erstellen
+# TemporÃ¤res Verzeichnis erstellen
 create_temp_dir() {
     mkdir -p "$TMP_DIR" || {
-        log "Warnung: Konnte temporäres Verzeichnis nicht erstellen, verwende /tmp"
+        log "Warnung: Konnte temporÃ¤res Verzeichnis nicht erstellen, verwende /tmp"
         TMP_DIR="/tmp"
     }
     chmod 700 "$TMP_DIR"
-    log "Temporäres Verzeichnis angelegt: $TMP_DIR"
+    log "TemporÃ¤res Verzeichnis angelegt: $TMP_DIR"
 }
 
 # Root-Check
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        log "FEHLER: Dieses Skript benötigt root-Rechte!"
+        log "FEHLER: Dieses Skript benÃ¶tigt root-Rechte!"
         return 1
     fi
     log "Root-Check erfolgreich"
@@ -175,7 +176,7 @@ check_root() {
 
 # Internetverbindung testen
 check_internet() {
-    log "Prüfe Internetverbindung..."
+    log "PrÃ¼fe Internetverbindung..."
     
     # Mehrere Ziele testen mit Timeout
     local targets=("google.com" "cloudflare.com" "1.1.1.1" "8.8.8.8")
@@ -188,7 +189,7 @@ check_internet() {
         fi
     done
     
-    # Wenn Ping fehlschlägt, versuche HTTP-Anfrage
+    # Wenn Ping fehlschlÃ¤gt, versuche HTTP-Anfrage
     if [ "$connected" = false ]; then
         if curl -s --connect-timeout 5 --max-time 10 "https://www.google.com" >/dev/null 2>&1 || \
            curl -s --connect-timeout 5 --max-time 10 "https://www.cloudflare.com" >/dev/null 2>&1 || \
@@ -199,17 +200,17 @@ check_internet() {
     
     if [ "$connected" = false ]; then
         log "KEINE INTERNETVERBINDUNG - Installation kann nicht fortgesetzt werden"
-        notify error "❌ Keine Internetverbindung verfügbar"
+        notify error "âŒ Keine Internetverbindung verfÃ¼gbar"
         return 1
     fi
     
-    log "Internetverbindung verfügbar"
+    log "Internetverbindung verfÃ¼gbar"
     return 0
 }
 
-# Abhängigkeiten installieren
+# AbhÃ¤ngigkeiten installieren
 install_dependencies() {
-    log "Installiere Systemabhängigkeiten"
+    log "Installiere SystemabhÃ¤ngigkeiten"
     
     if command -v apt-get >/dev/null; then
         apt-get update >/dev/null 2>&1 || {
@@ -218,43 +219,43 @@ install_dependencies() {
         apt-get install -y \
             curl wget awk sed grep coreutils \
             lsb-release iproute2 systemd >/dev/null 2>&1 || {
-            log "Fehler: Konnte Abhängigkeiten nicht installieren"
+            log "Fehler: Konnte AbhÃ¤ngigkeiten nicht installieren"
             return 1
         }
     elif command -v yum >/dev/null; then
         yum install -y \
             curl wget awk sed grep coreutils \
             redhat-lsb-systemd iproute >/dev/null 2>&1 || {
-            log "Fehler: Konnte Abhängigkeiten nicht installieren"
+            log "Fehler: Konnte AbhÃ¤ngigkeiten nicht installieren"
             return 1
         }
     elif command -v dnf >/dev/null; then
         dnf install -y \
             curl wget awk sed grep coreutils \
             redhat-lsb-systemd iproute >/dev/null 2>&1 || {
-            log "Fehler: Konnte Abhängigkeiten nicht installieren"
+            log "Fehler: Konnte AbhÃ¤ngigkeiten nicht installieren"
             return 1
         }
     else
-        log "Kein unterstützter Paketmanager gefunden!"
-        log "Versuche minimale Abhängigkeiten zu prüfen..."
+        log "Kein unterstÃ¼tzter Paketmanager gefunden!"
+        log "Versuche minimale AbhÃ¤ngigkeiten zu prÃ¼fen..."
         
-        # Prüfe minimale Abhängigkeiten
+        # PrÃ¼fe minimale AbhÃ¤ngigkeiten
         for cmd in curl wget grep sed; do
             if ! command -v $cmd >/dev/null; then
-                log "Kritische Abhängigkeit fehlt: $cmd"
+                log "Kritische AbhÃ¤ngigkeit fehlt: $cmd"
                 return 1
             fi
         done
         
-        log "Minimale Abhängigkeiten vorhanden, fahre fort"
+        log "Minimale AbhÃ¤ngigkeiten vorhanden, fahre fort"
     fi
     
-    log "Systemabhängigkeiten erfolgreich installiert oder bereits vorhanden"
+    log "SystemabhÃ¤ngigkeiten erfolgreich installiert oder bereits vorhanden"
     return 0
 }
 
-# SSH-Schlüssel einrichten
+# SSH-SchlÃ¼ssel einrichten
 setup_ssh_key() {
     if [ ! -d "$SSH_DIR" ]; then
         mkdir -p "$SSH_DIR" || {
@@ -265,29 +266,29 @@ setup_ssh_key() {
     fi
     
     if [ -n "$SSH_KEY" ]; then
-        # Prüfe, ob der Schlüssel bereits existiert
+        # PrÃ¼fe, ob der SchlÃ¼ssel bereits existiert
         if [ -f "$SSH_DIR/authorized_keys" ] && grep -q "$SSH_KEY" "$SSH_DIR/authorized_keys"; then
-            log "SSH-Schlüssel bereits vorhanden"
+            log "SSH-SchlÃ¼ssel bereits vorhanden"
             return 0
         fi
         
-        # Füge Schlüssel hinzu
+        # FÃ¼ge SchlÃ¼ssel hinzu
         echo "$SSH_KEY" >> "$SSH_DIR/authorized_keys" || {
-            log "Fehler: Konnte SSH-Schlüssel nicht hinzufügen"
+            log "Fehler: Konnte SSH-SchlÃ¼ssel nicht hinzufÃ¼gen"
             return 1
         }
         chmod 600 "$SSH_DIR/authorized_keys"
-        log "SSH-Schlüssel erfolgreich hinzugefügt"
+        log "SSH-SchlÃ¼ssel erfolgreich hinzugefÃ¼gt"
         notify info "SSH-Zugang eingerichtet"
     else
-        log "Kein SSH-Schlüssel angegeben, überspringe"
+        log "Kein SSH-SchlÃ¼ssel angegeben, Ã¼berspringe"
     fi
     
     return 0
 }
 # Systemaktualisierung
 update_system() {
-    log "Führe Systemaktualisierung durch"
+    log "FÃ¼hre Systemaktualisierung durch"
     
     if command -v apt-get >/dev/null; then
         apt-get update >/dev/null 2>&1 || {
@@ -305,7 +306,7 @@ update_system() {
             log "Warnung: dnf update fehlgeschlagen"
         }
     else
-        log "Kein unterstützter Paketmanager gefunden, überspringe Systemaktualisierung"
+        log "Kein unterstÃ¼tzter Paketmanager gefunden, Ã¼berspringe Systemaktualisierung"
     fi
     
     log "Systemaktualisierung abgeschlossen"
@@ -316,7 +317,7 @@ update_system() {
 install_docker() {
     log "Installiere Docker"
     
-    # Prüfe, ob Docker bereits installiert ist
+    # PrÃ¼fe, ob Docker bereits installiert ist
     if command -v docker >/dev/null; then
         log "Docker ist bereits installiert"
         return 0
@@ -328,7 +329,7 @@ install_docker() {
         apt-get update >/dev/null 2>&1
         apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release >/dev/null 2>&1
         
-        # Füge Docker-Repository hinzu
+        # FÃ¼ge Docker-Repository hinzu
         mkdir -p /etc/apt/keyrings
         curl -fsSL https://download.docker.com/linux/$(lsb_release -is | tr '[:upper:]' '[:lower:]')/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg >/dev/null 2>&1
         
@@ -356,7 +357,7 @@ install_docker() {
     # Starte und aktiviere Docker
     systemctl enable --now docker >/dev/null 2>&1
     
-    # Prüfe, ob Docker erfolgreich installiert wurde
+    # PrÃ¼fe, ob Docker erfolgreich installiert wurde
     if ! command -v docker >/dev/null; then
         log "Fehler: Docker-Installation fehlgeschlagen"
         return 1
@@ -370,7 +371,7 @@ install_docker() {
 install_docker_compose() {
     log "Installiere Docker Compose"
     
-    # Prüfe, ob Docker Compose bereits installiert ist
+    # PrÃ¼fe, ob Docker Compose bereits installiert ist
     if command -v docker-compose >/dev/null; then
         log "Docker Compose ist bereits installiert"
         return 0
@@ -387,7 +388,7 @@ install_docker_compose() {
     curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose >/dev/null 2>&1
     chmod +x /usr/local/bin/docker-compose
     
-    # Prüfe, ob Docker Compose erfolgreich installiert wurde
+    # PrÃ¼fe, ob Docker Compose erfolgreich installiert wurde
     if ! command -v docker-compose >/dev/null; then
         log "Fehler: Docker Compose-Installation fehlgeschlagen"
         return 1
@@ -400,27 +401,27 @@ install_docker_compose() {
 main() {
     log "Starte Server-Setup-Skript"
     
-    # Prüfe Root-Rechte
+    # PrÃ¼fe Root-Rechte
     if [ "$(id -u)" -ne 0 ]; then
-        log "Fehler: Dieses Skript muss als Root ausgeführt werden"
+        log "Fehler: Dieses Skript muss als Root ausgefÃ¼hrt werden"
         exit 1
     fi
     
-    # Erstelle temporäres Verzeichnis
+    # Erstelle temporÃ¤res Verzeichnis
     mkdir -p "$TMP_DIR"
     
-    # Führe Funktionen aus
+    # FÃ¼hre Funktionen aus
     check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
-    check_internet || { log "Internetverbindung nicht verfügbar"; exit 1; }
+    check_internet || { log "Internetverbindung nicht verfÃ¼gbar"; exit 1; }
     create_temp_dir
-    install_dependencies || log "Warnung: Installation der Abhängigkeiten fehlgeschlagen"
+    install_dependencies || log "Warnung: Installation der AbhÃ¤ngigkeiten fehlgeschlagen"
     update_system || log "Warnung: Systemaktualisierung fehlgeschlagen"
     get_system_info
     manage_hostname || log "Warnung: Hostname-Konfiguration fehlgeschlagen"
-    setup_ssh_key || log "Warnung: SSH-Schlüssel-Setup fehlgeschlagen"
+    setup_ssh_key || log "Warnung: SSH-SchlÃ¼ssel-Setup fehlgeschlagen"
     ubuntu_pro_attach || log "Warnung: Ubuntu Pro Aktivierung fehlgeschlagen"
     
-    # Installiere Docker und Docker Compose, falls gewünscht
+    # Installiere Docker und Docker Compose, falls gewÃ¼nscht
     if [ "$INSTALL_DOCKER" = "true" ]; then
         install_docker || log "Warnung: Docker-Installation fehlgeschlagen"
         install_docker_compose || log "Warnung: Docker Compose-Installation fehlgeschlagen"
@@ -429,7 +430,7 @@ main() {
     # Erstelle Zusammenfassung
     create_summary
     
-    # Bereinige temporäres Verzeichnis
+    # Bereinige temporÃ¤res Verzeichnis
     rm -rf "$TMP_DIR"
     
     log "Server-Setup abgeschlossen"
@@ -491,7 +492,7 @@ Optionen:
   -l, --log DATEI         Gibt eine alternative Log-Datei an
 
 Beispiele:
-  $0                      Führt Basiseinrichtung aus
+  $0                      FÃ¼hrt Basiseinrichtung aus
   $0 -d                   Installiert Docker und Docker Compose
   $0 --log /var/log/server-setup.log
 
@@ -518,7 +519,7 @@ process_args() {
                     LOG_FILE="$2"
                     shift 2
                 else
-                    log "Fehler: --log benötigt einen Dateinamen"
+                    log "Fehler: --log benÃ¶tigt einen Dateinamen"
                     exit 1
                 fi
                 ;;
@@ -535,13 +536,13 @@ process_args() {
     done
 }
 
-# Trap für Error-Handling
+# Trap fÃ¼r Error-Handling
 trap 'error_handler $LINENO' ERR
 
 # Verarbeite Kommandozeilenargumente
 process_args "$@"
 
-# Führe Hauptfunktion aus
+# FÃ¼hre Hauptfunktion aus
 main
 
 # Erfolgreich beendet
