@@ -103,6 +103,340 @@ install_sudo() {
         return 1
     fi
 }
+# Umfassende Systemreinigung
+perform_system_cleanup() {
+    log "Starte umfassende Systemreinigung"
+    
+    # Überprüfe, ob als Root ausgeführt
+    if [ "$(id -u)" -ne 0 ]; then
+        log "Fehler: Systemreinigung muss als Root ausgeführt werden"
+        return 1
+    fi
+    
+    local cleanup_report="$TMP_DIR/cleanup_report.txt"
+    echo "==== UMFASSENDE SYSTEMREINIGUNG - START $(date) ====" > "$cleanup_report"
+    
+    # PHASE 1: DIAGNOSE - Speicherplatz vor Bereinigung erfassen
+    log "PHASE 1: Systemdiagnose vor Bereinigung"
+    {
+        echo -e "\n[DIAGNOSE] Speicherplatz vor Bereinigung:"
+        df -h
+        
+        echo -e "\n[DIAGNOSE] Inode-Nutzung:"
+        df -i
+        
+        echo -e "\n[DIAGNOSE] Dateisystem mit höchster Belegung:"
+        df -h | sort -k5rh | head -5
+        
+        echo -e "\n[DIAGNOSE] Größte Verzeichnisse:"
+        du -hax --max-depth=2 / 2>/dev/null | sort -rh | head -15
+        
+        echo -e "\n[DIAGNOSE] Größte Dateien:"
+        find / -xdev -type f -size +50M -exec ls -lh {} \; 2>/dev/null | sort -k5,5rh | head -10
+    } >> "$cleanup_report"
+    
+    # Prüfe, ob ein Notfall vorliegt (>90% Speicherverbrauch)
+    root_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+    if [ "$root_usage" -ge 90 ]; then
+        log "WARNUNG: Kritische Speichersituation erkannt (${root_usage}% belegt)"
+        perform_emergency_cleanup >> "$cleanup_report"
+    fi
+    
+    # PHASE 2: DOCKER BEREINIGUNG
+    log "PHASE 2: Docker-Ressourcen bereinigen"
+    {
+        echo -e "\n[BEREINIGUNG] Docker Ressourcen..."
+        if command -v docker &>/dev/null; then
+            echo "Docker Status vor Bereinigung:"
+            docker system df
+            
+            echo "Bereinige Docker Images und Container..."
+            # Stoppe Container, die zu viel Platz verbrauchen (Top 5)
+            docker ps -a --format "{{.Size}}\t{{.Names}}" 2>/dev/null | sort -rh | head -5 | cut -f2 | xargs -r docker stop 2>/dev/null || true
+            
+            # Entferne ungenutzte Docker-Ressourcen
+            docker system prune -af --volumes 2>/dev/null || true
+            
+            # Entferne ungenutzte Volumes (kann viel Platz sparen)
+            docker volume prune -f 2>/dev/null || true
+            
+            # Entferne Build-Cache
+            docker builder prune -af 2>/dev/null || true
+            
+            # Begrenze Log-Dateien für alle laufenden Container
+            docker ps -q | xargs -r docker inspect -f '{{.LogPath}}' 2>/dev/null | xargs -r truncate -s 1M 2>/dev/null || true
+            
+            echo "Docker Status nach Bereinigung:"
+            docker system df
+        else
+            echo "Docker nicht installiert."
+        fi
+    } >> "$cleanup_report"
+    
+    # PHASE 3: PAKETMANAGER BEREINIGEN
+    log "PHASE 3: Paketmanager Cache bereinigen"
+    {
+        echo -e "\n[BEREINIGUNG] Paketmanager Cache..."
+        
+        # APT (Debian/Ubuntu)
+        if command -v apt-get &>/dev/null; then
+            echo "Debian/Ubuntu: Bereinige APT-Cache"
+            apt-get clean -y
+            apt-get autoclean -y
+            apt-get autoremove -y
+            
+            # Entferne alte Kernel-Pakete, behalte den aktuellen und einen Backup
+            dpkg -l 'linux-image*' | grep -v "$(uname -r | sed 's/-generic//')" | grep '^ii' | awk '{print $2}' | sort -V | head -n -1 | xargs -r apt-get -y purge
+            
+            # Entferne alte Kernel-Header
+            dpkg -l 'linux-headers*' | grep -v "$(uname -r | sed 's/-generic//')" | grep '^ii' | awk '{print $2}' | sort -V | head -n -1 | xargs -r apt-get -y purge
+        fi
+        
+        # YUM (RHEL/CentOS/Fedora älter)
+        if command -v yum &>/dev/null; then
+            echo "RHEL/CentOS: Bereinige YUM-Cache"
+            yum clean all
+            rm -rf /var/cache/yum/*
+            yum autoremove -y
+            
+            # Versuche alte Kernels zu entfernen
+            current=$(uname -r)
+            echo "Aktueller Kernel: $current"
+            if rpm -q kernel | grep -v "$current" | sort -V | head -n -1; then
+                rpm -q kernel | grep -v "$current" | sort -V | head -n -1 | xargs -r rpm -e --nodeps
+            fi
+        fi
+        
+        # DNF (Fedora/RHEL neuere Versionen)
+        if command -v dnf &>/dev/null; then
+            echo "RHEL/Fedora: Bereinige DNF-Cache"
+            dnf clean all
+            rm -rf /var/cache/dnf/*
+            dnf autoremove -y
+            
+            # Alte Kernels entfernen, aktuellen und einen Backup behalten
+            dnf remove $(dnf repoquery --installonly --latest-limit=-2 -q) -y
+        fi
+        
+        # ZYPPER (openSUSE/SUSE)
+        if command -v zypper &>/dev/null; then
+            echo "SUSE: Bereinige Zypper-Cache"
+            zypper clean --all
+            zypper packages --unneeded | grep -v "Protected" | awk '{print $5}' | xargs -r zypper remove -y
+        fi
+        
+        # PACMAN (Arch Linux)
+        if command -v pacman &>/dev/null; then
+            echo "Arch Linux: Bereinige Pacman-Cache"
+            pacman -Sc --noconfirm
+            pacman -Rns $(pacman -Qtdq) --noconfirm 2>/dev/null || true
+        fi
+    } >> "$cleanup_report"
+    
+    # PHASE 4: LOG-DATEIEN BEREINIGEN
+    log "PHASE 4: Log-Dateien bereinigen"
+    {
+        echo -e "\n[BEREINIGUNG] Log-Dateien..."
+        
+        # Entferne alte Log-Archive
+        echo "Entferne alte Log-Archive..."
+        find /var/log -type f \( -name "*.gz" -o -name "*.bz2" -o -name "*.xz" -o -name "*.zip" -o -name "*.old" \) -delete 2>/dev/null || true
+        
+        # Rotierte Logs entfernen
+        echo "Entferne rotierte Logs..."
+        find /var/log -type f -regex ".*\.[0-9]+" -delete 2>/dev/null || true
+        
+        # Leere große Log-Dateien (behalte Datei, aber entferne Inhalt)
+        echo "Kürze große Log-Dateien..."
+        find /var/log -type f -size +50M | while read log_file; do
+            echo "" > "$log_file" 2>/dev/null
+        done
+        
+        # Entferne Crash-Dumps
+        echo "Entferne Crash-Dumps..."
+        rm -rf /var/crash/* /var/dump/* 2>/dev/null || true
+        
+        # Systemd-Journal bereinigen
+        if command -v journalctl &>/dev/null; then
+            echo "Bereinige Systemd-Journal..."
+            journalctl --vacuum-time=7d --vacuum-size=100M
+            
+            # Ältere Methode für alte Systemd-Versionen
+            rm -rf /var/log/journal/$(cat /etc/machine-id 2>/dev/null)/*@*.journal 2>/dev/null || true
+        fi
+    } >> "$cleanup_report"
+    
+    # PHASE 5: TEMPORÄRE DATEIEN BEREINIGEN
+    log "PHASE 5: Temporäre Dateien bereinigen"
+    {
+        echo -e "\n[BEREINIGUNG] Temporäre Dateien..."
+        
+        # Leere temporäre Verzeichnisse
+        echo "Leere temporäre Verzeichnisse..."
+        rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
+        
+        # Entferne Vim-Swap und Backup-Dateien
+        echo "Entferne Vim-Swap und Backup-Dateien..."
+        find / -xdev -name "*.sw[po]" -o -name ".*.sw[po]" -o -name "*~" -delete 2>/dev/null || true
+        
+        # Entferne Browser-Caches in Benutzerverzeichnissen
+        echo "Entferne Browser-Caches..."
+        find /home /root -path "*/\.cache/chromium*" -type d -exec rm -rf {} \; 2>/dev/null || true
+        find /home /root -path "*/\.cache/mozilla*" -type d -exec rm -rf {} \; 2>/dev/null || true
+        
+        # Entferne Paketierungs-Artefakte
+        echo "Entferne Paketierungs-Artefakte..."
+        find / -xdev -name "*.deb" -o -name "*.rpm" -size +10M -delete 2>/dev/null || true
+        
+        # Entferne Kernel-Core-Dumps
+        echo "Entferne Kernel-Core-Dumps..."
+        find / -xdev -name "core" -o -name "core.[0-9]*" -delete 2>/dev/null || true
+    } >> "$cleanup_report"
+    
+    # PHASE 6: BOOT-PARTITION BEREINIGEN
+    log "PHASE 6: Boot-Partition bereinigen"
+    {
+        echo -e "\n[BEREINIGUNG] Boot-Partition..."
+        
+        if [ -d /boot ]; then
+            boot_usage=$(df /boot 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+            
+            if [ -n "$boot_usage" ] && [ "$boot_usage" -gt 70 ]; then
+                echo "/boot ist zu ${boot_usage}% voll, bereinige..."
+                current_kernel=$(uname -r)
+                echo "Aktueller Kernel: $current_kernel"
+                
+                # Entferne alte initramfs-Dateien, behalte aktuellen und einen Backup
+                ls -t /boot/initramfs-*.img 2>/dev/null | grep -v "$current_kernel" | tail -n +3 | xargs -r rm -f
+                
+                # Entferne alte vmlinuz-Dateien, behalte aktuellen und einen Backup
+                ls -t /boot/vmlinuz-* 2>/dev/null | grep -v "$current_kernel" | tail -n +3 | xargs -r rm -f
+                
+                # Bei kritischem Speicherplatzmangel auch Rescue-Kernel entfernen
+                if [ "$boot_usage" -gt 85 ]; then
+                    echo "Kritischer Speichermangel in /boot, entferne Rescue-Kernel..."
+                    rm -f /boot/*rescue* 2>/dev/null || true
+                fi
+            else
+                echo "/boot hat ausreichend Speicherplatz (${boot_usage}%)"
+            fi
+        else
+            echo "Kein separates /boot-Verzeichnis gefunden"
+        fi
+    } >> "$cleanup_report"
+    
+    # PHASE 7: SYSTEM-CACHE LEEREN
+    log "PHASE 7: System-Cache leeren"
+    {
+        echo -e "\n[BEREINIGUNG] System-Cache..."
+        
+        # Synchronisiere Dateisystem
+        echo "Synchronisiere Dateisystem..."
+        sync
+        
+        # Leere Page-Cache, Dentry- und Inode-Cache wenn möglich
+        echo "Leere Page-Cache, Dentry- und Inode-Cache..."
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+        
+        # Leere Swap wenn vorhanden
+        echo "Leere Swap wenn vorhanden..."
+        if grep -q "SwapTotal" /proc/meminfo && [ "$(grep -i "SwapTotal" /proc/meminfo | awk '{print $2}')" -gt 0 ]; then
+            swapoff -a 2>/dev/null && swapon -a 2>/dev/null || true
+            echo "Swap wurde geleert und neu aktiviert"
+        else
+            echo "Kein Swap konfiguriert oder aktiv"
+        fi
+    } >> "$cleanup_report"
+    
+    # PHASE 8: ERGEBNIS DOKUMENTIEREN
+    log "PHASE 8: Ergebnisse dokumentieren"
+    {
+        echo -e "\n[ERGEBNIS] Speicherplatz nach Bereinigung:"
+        df -h
+        
+        echo -e "\n[ERGEBNIS] Inode-Nutzung nach Bereinigung:"
+        df -i
+        
+        echo -e "\n==== UMFASSENDE SYSTEMREINIGUNG - ENDE $(date) ===="
+    } >> "$cleanup_report"
+    
+    # Zeige Bericht an
+    cat "$cleanup_report"
+    
+    # Speichere Bericht in permanenter Datei
+    local permanent_report="/var/log/globalping-cleanup-$(date +%Y%m%d-%H%M%S).log"
+    cp "$cleanup_report" "$permanent_report"
+    log "Bereinigungsbericht gespeichert in: $permanent_report"
+    
+    # Benachrichtigung senden
+    notify success "✅ Systemreinigung abgeschlossen. ${root_usage}% Speicher verwendet."
+    
+    return 0
+}
+
+# Notfall-Bereinigung für kritische Speichersituationen
+perform_emergency_cleanup() {
+    echo -e "\n[NOTFALL] Kritische Speichersituation erkannt, aggressive Reinigung..."
+    
+    # SOFORTIGE SPEICHERFREIGABE FÜR KRITISCHE SITUATIONEN
+    echo "1. Aggressive Log-Bereinigung..."
+    # Kürze ALLE Log-Dateien
+    find /var/log -type f -not -path "*/globalping*" -exec truncate -s 0 {} \; 2>/dev/null || true
+    
+    echo "2. Entferne alle Docker Container Logs..."
+    # Docker Log-Dateien direkt aufräumen (nicht nur über Docker-Befehle)
+    if [ -d /var/lib/docker/containers ]; then
+        find /var/lib/docker/containers -name "*-json.log" -exec truncate -s 0 {} \; 2>/dev/null || true
+    fi
+    
+    echo "3. Leere Benutzer-Caches..."
+    # Entferne alle Cache-Verzeichnisse in Home-Verzeichnissen
+    find /home -type d -name ".cache" -exec rm -rf {}/* \; 2>/dev/null || true
+    find /root -type d -name ".cache" -exec rm -rf {}/* \; 2>/dev/null || true
+    
+    echo "4. Entferne überschüssige Docker-Ressourcen..."
+    # Stoppe nicht essenzielle Container (außer Globalping)
+    if command -v docker &>/dev/null; then
+        docker ps -a | grep -v "globalping" | awk '{if(NR>1) print $1}' | xargs -r docker stop 2>/dev/null || true
+        docker ps -a | grep -v "globalping" | awk '{if(NR>1) print $1}' | xargs -r docker rm 2>/dev/null || true
+    fi
+    
+    echo "5. Entferne unbenutzte Pakete..."
+    # Unbenutzte Pakete aggressiv entfernen
+    if command -v apt-get &>/dev/null; then
+        apt-get autoremove --purge -y
+        # Entferne auch manuelle Paketarchive
+        rm -rf /var/cache/apt/archives/*.deb
+    elif command -v dnf &>/dev/null; then
+        dnf autoremove -y
+        dnf clean all
+    elif command -v yum &>/dev/null; then
+        yum autoremove -y
+        yum clean all
+    fi
+    
+    echo "6. Entferne alle alten Kernel außer dem aktuellen..."
+    # Entferne aggressiv alte Kernel (behalte nur den aktuellen)
+    current=$(uname -r)
+    # Für Debian/Ubuntu
+    if command -v dpkg &>/dev/null; then
+        dpkg -l 'linux-image*' | grep -v "$current" | grep '^ii' | awk '{print $2}' | xargs -r apt-get -y purge
+    # Für RHEL/CentOS
+    elif command -v rpm &>/dev/null; then
+        rpm -q kernel | grep -v "$current" | xargs -r rpm -e --nodeps
+    fi
+    
+    echo "7. Entferne alle Artefakte in temporären Verzeichnissen..."
+    # Komplett-Reinigung temporärer Verzeichnisse
+    rm -rf /tmp/* /var/tmp/* /var/cache/* 2>/dev/null || true
+    
+    echo "8. Erzwinge Garbage Collection..."
+    # Erzwinge Garbage Collection im Speicher
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    
+    echo "[NOTFALL] Aggressive Reinigung abgeschlossen"
+}
 # Direkte Hostname-Konfiguration ohne Zufallszahlen
 configure_hostname() {
     log "Konfiguriere Hostname im Format: Land-ISP-ASN-globalping-IPOktett"
@@ -240,14 +574,69 @@ check_anacron_available() {
 }
 
 # Auto-Update-Funktion - implementiert mehrere Scheduling-Optionen
+# Skript-Auto-Update mit verbesserter Pfaderkennung
 setup_auto_update() {
     log "Richte automatische Skript-Updates ein"
     
+    # Ermittle den tatsächlichen Pfad der aktuellen Skriptdatei
+    local current_script=""
+    
+    # Methode 1: Verwende readlink, falls verfügbar
+    if command -v readlink >/dev/null && [ -n "$0" ] && [ "$0" != "bash" ]; then
+        current_script=$(readlink -f "$0" 2>/dev/null || echo "")
+    fi
+    
+    # Methode 2: Wenn readlink fehlschlägt oder $0 nicht brauchbar ist
+    if [ -z "$current_script" ] || [ ! -f "$current_script" ]; then
+        # Versuche, das Skript im aktuellen Verzeichnis zu finden
+        for potential_script in "install.sh" "globalping-install.sh" "./install.sh" "./globalping-install.sh"; do
+            if [ -f "$potential_script" ]; then
+                current_script="$(pwd)/$potential_script"
+                break
+            fi
+        done
+    fi
+    
+    # Methode 3: Als letzten Ausweg das Skript herunterladen
+    if [ -z "$current_script" ] || [ ! -f "$current_script" ]; then
+        log "Kann aktuelles Skript nicht finden, lade es herunter..."
+        current_script="$TMP_DIR/downloaded_install.sh"
+        if ! curl -s -o "$current_script" "$SCRIPT_URL"; then
+            log "Fehler: Konnte Skript nicht herunterladen"
+            return 1
+        fi
+        chmod +x "$current_script"
+    fi
+    
+    # Überprüfe, ob das Skript gefunden wurde
+    if [ ! -f "$current_script" ]; then
+        log "Fehler: Konnte kein gültiges Skript für Auto-Update finden"
+        return 1
+    fi
+    
+    log "Gefundenes Skript: $current_script"
+    
     # Erstelle Kopie des aktuellen Skripts im Zielpfad
-    if [ "$0" != "$SCRIPT_PATH" ]; then
-        cp "$0" "$SCRIPT_PATH"
-        chmod +x "$SCRIPT_PATH"
+    if [ "$current_script" != "$SCRIPT_PATH" ]; then
+        # Stelle sicher, dass das Zielverzeichnis existiert
+        mkdir -p "$(dirname "$SCRIPT_PATH")" || {
+            log "Fehler: Konnte Verzeichnis für Skript nicht erstellen"
+            return 1
+        }
+        
+        # Kopiere das Skript
+        cp "$current_script" "$SCRIPT_PATH" || {
+            log "Fehler: Konnte Skript nicht nach $SCRIPT_PATH kopieren"
+            return 1
+        }
+        
+        chmod +x "$SCRIPT_PATH" || {
+            log "Warnung: Konnte Ausführungsrechte nicht setzen"
+        }
+        
         log "Skript in $SCRIPT_PATH installiert"
+    else
+        log "Skript ist bereits am Zielort installiert"
     fi
     
     # Zufälliges Zeitoffset für verteilte Updates
@@ -1691,6 +2080,9 @@ main() {
     # Auto-Update einrichten
     setup_auto_update || log "Warnung: Auto-Update-Einrichtung fehlgeschlagen"
     
+    # Systemreinigung durchführen
+    perform_system_cleanup || log "Warnung: Systemreinigung fehlgeschlagen"
+
     # Führe Diagnose durch
     run_diagnostics
     
@@ -1783,6 +2175,8 @@ Optionen:
   --telegram-chat ID          Setzt die Telegram-Chat-ID
   --ubuntu-token TOKEN        Setzt den Ubuntu Pro Token
   --ssh-key SCHLÜSSEL         Fügt einen SSH-Schlüssel hinzu
+  --cleanup                  Führt eine umfassende Systemreinigung durch
+  --emergency-cleanup        Führt eine Notfall-Systemreinigung durch
   --diagnose                  Führt umfassende Systemdiagnose durch
   --debug                     Aktiviert ausführliches Logging
   --auto-update               Führt automatisches Update durch
@@ -1871,6 +2265,18 @@ process_args() {
                     log "Fehler: --ssh-key benötigt einen Wert"
                     exit 1
                 fi
+                ;;
+            --cleanup)
+                check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
+                create_temp_dir
+                perform_system_cleanup
+                exit 0
+                ;;
+            --emergency-cleanup)
+                check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
+                create_temp_dir
+                perform_emergency_cleanup
+                exit 0
                 ;;
             --diagnose)
                 RUN_DIAGNOSTICS_ONLY="true"
