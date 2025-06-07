@@ -632,7 +632,7 @@ install_docker_compose() {
 
 # Globalping-Probe installieren und konfigurieren
 install_globalping_probe() {
-    log "Installiere Globalping-Probe"
+    log "Prüfe Globalping-Probe Status"
     
     # Voraussetzungen prüfen
     if [ -z "$ADOPTION_TOKEN" ]; then
@@ -659,6 +659,40 @@ install_globalping_probe() {
             notify error "❌ Globalping-Probe-Installation fehlgeschlagen: Docker Compose nicht verfügbar"
             return 1
         }
+    fi
+    
+    # Prüfen, ob bereits ein Globalping-Container existiert
+    if docker ps -a | grep -q globalping-probe; then
+        log "Globalping-Probe Container existiert bereits"
+        
+        # Prüfen, ob der Container mit dem richtigen Token läuft
+        local current_token=$(docker inspect -f '{{range .Config.Env}}{{if eq (index (split . "=") 0) "ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}' globalping-probe 2>/dev/null || echo "")
+        
+        if [ "$current_token" = "$ADOPTION_TOKEN" ]; then
+            log "Globalping-Probe ist bereits mit dem richtigen Token konfiguriert"
+            
+            # Prüfen ob ein Update verfügbar ist
+            log "Prüfe auf Updates für Globalping-Probe..."
+            
+            # Container stoppen, Image aktualisieren und neu starten
+            log "Aktualisiere Globalping-Probe..."
+            
+            docker stop globalping-probe >/dev/null 2>&1
+            docker rm globalping-probe >/dev/null 2>&1
+            docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
+            
+            log "Alte Globalping-Probe entfernt, starte neue Version"
+        else
+            log "Globalping-Probe mit unterschiedlichem Token gefunden, aktualisiere..."
+            
+            # Container stoppen und entfernen
+            docker stop globalping-probe >/dev/null 2>&1
+            docker rm globalping-probe >/dev/null 2>&1
+            
+            log "Alte Globalping-Probe entfernt, setze mit neuem Token fort"
+        fi
+    else
+        log "Keine vorhandene Globalping-Probe gefunden, führe Neuinstallation durch"
     fi
     
     # Verzeichnis erstellen
