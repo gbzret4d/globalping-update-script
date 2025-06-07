@@ -13,7 +13,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/gbzret4d/globalping-update-script/
 SCRIPT_PATH="/usr/local/bin/install_globalping.sh"
 CRON_JOB="0 0 * * 0 /usr/local/bin/globalping-maintenance"
 AUTO_UPDATE_CRON="0 0 * * 0 /usr/local/bin/install_globalping.sh --auto-update"
-SCRIPT_VERSION="2023.10.20"
+SCRIPT_VERSION="2023.10.21"
 
 # =============================================
 # FUNKTIONEN
@@ -101,7 +101,89 @@ install_sudo() {
         return 1
     fi
 }
-
+# Direkte Hostname-Konfiguration ohne Zufallszahlen
+configure_hostname() {
+    log "Konfiguriere Hostname im Format: Land-ISP-ASN-globalping-IPOktett"
+    
+    # Hole IP-Adresse mit Fallback-Optionen
+    IP_ADDRESS=$(curl -s -4 --connect-timeout 5 https://api.ipify.org || 
+                 curl -s -4 --connect-timeout 5 https://ifconfig.me || 
+                 curl -s -4 --connect-timeout 5 https://icanhazip.com || 
+                 echo "0.0.0.0")
+    IP_FIRST_OCTET=$(echo "$IP_ADDRESS" | cut -d '.' -f1)
+    
+    # Debug-Ausgabe
+    log "Öffentliche IP erkannt: $IP_ADDRESS (Erstes Oktett: $IP_FIRST_OCTET)"
+    
+    # Primäre Methode: ipinfo.io
+    log "Versuche Daten von ipinfo.io zu holen..."
+    ipinfo_response=$(curl -s --connect-timeout 5 "https://ipinfo.io/json")
+    
+    if [ -n "$ipinfo_response" ] && ! echo "$ipinfo_response" | grep -q "error"; then
+        COUNTRY=$(echo "$ipinfo_response" | grep -o '"country": "[^"]*' | cut -d'"' -f4)
+        ASN_RAW=$(echo "$ipinfo_response" | grep -o '"org": "[^"]*' | cut -d'"' -f4)
+        ASN=$(echo "$ASN_RAW" | grep -o "^AS[0-9]*" | sed 's/AS//')
+        ISP=$(echo "$ASN_RAW" | sed 's/^AS[0-9]* //' | tr ' ' '-' | tr -cd '[:alnum:]-')
+        
+        log "ipinfo.io Daten erfolgreich abgerufen"
+        log "Land: $COUNTRY, ASN: $ASN, ISP: $ISP"
+    else
+        # Fallback: ip-api.com
+        log "ipinfo.io fehlgeschlagen, versuche ip-api.com..."
+        ip_api_response=$(curl -s --connect-timeout 5 "http://ip-api.com/json")
+        
+        if [ -n "$ip_api_response" ] && echo "$ip_api_response" | grep -q '"status":"success"'; then
+            COUNTRY=$(echo "$ip_api_response" | grep -o '"countryCode":"[^"]*' | cut -d'"' -f4)
+            ASN=$(echo "$ip_api_response" | grep -o '"as":"[^"]*' | cut -d'"' -f4 | grep -o "AS[0-9]*" | sed 's/AS//')
+            ISP=$(echo "$ip_api_response" | grep -o '"isp":"[^"]*' | cut -d'"' -f4 | tr ' ' '-' | tr -cd '[:alnum:]-')
+            
+            log "ip-api.com Daten erfolgreich abgerufen"
+            log "Land: $COUNTRY, ASN: $ASN, ISP: $ISP"
+        else
+            # Notfall-Fallback
+            log "Beide API-Anfragen fehlgeschlagen, verwende Standardwerte"
+            COUNTRY="XX"
+            ASN="0"
+            ISP="unknown"
+        fi
+    fi
+    
+    # Sicherstellen, dass alle Variablen Werte haben
+    [ -z "$COUNTRY" ] && COUNTRY="XX"
+    [ -z "$ASN" ] && ASN="0"
+    [ -z "$ISP" ] && ISP="unknown"
+    
+    # ISP-Name validieren und kürzen
+    ISP=$(echo "$ISP" | tr -cd '[:alnum:]-')
+    
+    # Hostname generieren
+    NEW_HOSTNAME="${COUNTRY}-${ISP}-${ASN}-globalping-${IP_FIRST_OCTET}"
+    
+    # Hostname-Länge auf DNS-Limit (63 Zeichen) beschränken
+    if [ ${#NEW_HOSTNAME} -gt 63 ]; then
+        # Maximale ISP-Länge berechnen
+        max_isp_length=$((63 - ${#COUNTRY} - ${#ASN} - 13 - ${#IP_FIRST_OCTET}))
+        ISP="${ISP:0:$max_isp_length}"
+        NEW_HOSTNAME="${COUNTRY}-${ISP}-${ASN}-globalping-${IP_FIRST_OCTET}"
+        log "Hostname gekürzt: $NEW_HOSTNAME"
+    fi
+    
+    log "Setze Hostname: $NEW_HOSTNAME"
+    hostnamectl set-hostname "$NEW_HOSTNAME" || {
+        log "hostnamectl fehlgeschlagen, versuche hostname-Befehl"
+        hostname "$NEW_HOSTNAME"
+        echo "$NEW_HOSTNAME" > /etc/hostname
+    }
+    
+    # Hostname in /etc/hosts eintragen
+    if [ -f /etc/hosts ]; then
+        sed -i '/^127\.0\.1\.1/d' /etc/hosts
+        echo "127.0.1.1 $NEW_HOSTNAME" >> /etc/hosts
+    fi
+    
+    log "Hostname erfolgreich konfiguriert: $NEW_HOSTNAME"
+    return 0
+}
 # Ubuntu Pro Aktivierung
 ubuntu_pro_attach() {
     if [ -n "$UBUNTU_PRO_TOKEN" ] && grep -q "Ubuntu" /etc/os-release; then
@@ -130,121 +212,6 @@ ubuntu_pro_attach() {
     fi
 }
 
-# Hostname Management mit spezifischem Schema
-manage_hostname() {
-    log "Konfiguriere Hostname nach Schema"
-    
-    # Sammle benötigte Informationen (falls noch nicht vorhanden)
-    if [ -z "$COUNTRY" ] || [ -z "$ASN" ] || [ -z "$IP_ADDRESS" ] || [ -z "$PROVIDER" ]; then
-        log "Sammle Informationen für Hostname-Schema..."
-        COUNTRY=$(curl -4 -s --connect-timeout 5 https://ipinfo.io/country | tr '[:upper:]' '[:lower:]' || echo "xx")
-        IP_ADDRESS=$(curl -4 -s --connect-timeout 5 https://ipinfo.io/ip || echo "0.0.0.0")
-        ASN_INFO=$(curl -4 -s --connect-timeout 5 https://ipinfo.io/org || echo "AS0 unknown")
-        PROVIDER=$(echo "$ASN_INFO" | cut -d ' ' -f2- | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
-        ASN=$(echo "$ASN_INFO" | cut -d ' ' -f1 | sed 's/AS//')
-    fi
-    
-    # Extrahiere erstes Oktett der IP
-    IP_FIRST_OCTET=$(echo "$IP_ADDRESS" | cut -d '.' -f1)
-    
-    # Beschränke Providernamen auf max. 10 Zeichen und entferne Sonderzeichen
-    PROVIDER_SHORT=$(echo "$PROVIDER" | sed 's/[^a-z0-9\-]/-/g' | cut -c 1-10 | sed 's/-*$//')
-    
-    # Generiere neuen Hostnamen nach Schema
-    NEW_HOSTNAME="${COUNTRY}-${PROVIDER_SHORT}-${ASN}-globalping-${IP_FIRST_OCTET}"
-    
-    # Begrenze Länge auf max. 63 Zeichen (DNS-Limit)
-    if [ ${#NEW_HOSTNAME} -gt 63 ]; then
-        NEW_HOSTNAME=$(echo "$NEW_HOSTNAME" | cut -c 1-63)
-        log "Hostname war zu lang, gekürzt auf: $NEW_HOSTNAME"
-    fi
-    
-    log "Setze neuen Hostname: $NEW_HOSTNAME"
-    
-    # Aktueller Hostname zum Vergleich
-    CURRENT_HOSTNAME=$(hostname)
-    
-    # Setze Hostname nur, wenn er sich geändert hat
-    if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
-        # Methode 1: hostnamectl (systemd-Systeme)
-        if command -v hostnamectl >/dev/null; then
-            hostnamectl set-hostname "$NEW_HOSTNAME" || {
-                log "Warnung: hostnamectl fehlgeschlagen, versuche alternative Methode"
-                # Methode 2: hostname-Befehl
-                hostname "$NEW_HOSTNAME" || {
-                    log "Fehler: Konnte Hostname nicht setzen"
-                    return 1
-                }
-            }
-        else
-            # Methode 2: hostname-Befehl
-            hostname "$NEW_HOSTNAME" || {
-                log "Fehler: Konnte Hostname nicht setzen"
-                return 1
-            }
-            
-            # Bei Nicht-systemd-Systemen: Update in /etc/hostname
-            if [ -f /etc/hostname ]; then
-                echo "$NEW_HOSTNAME" > /etc/hostname || log "Warnung: Konnte /etc/hostname nicht aktualisieren"
-            fi
-            
-            # Bei RHEL/CentOS/etc.: Update in /etc/sysconfig/network
-            if [ -f /etc/sysconfig/network ]; then
-                if grep -q "HOSTNAME=" /etc/sysconfig/network; then
-                    sed -i "s/HOSTNAME=.*/HOSTNAME=$NEW_HOSTNAME/" /etc/sysconfig/network
-                else
-                    echo "HOSTNAME=$NEW_HOSTNAME" >> /etc/sysconfig/network
-                fi
-            fi
-        fi
-        
-        log "Hostname erfolgreich geändert zu: $NEW_HOSTNAME"
-    else
-        log "Hostname ist bereits korrekt: $NEW_HOSTNAME"
-    fi
-    
-    # Backup der originalen hosts-Datei
-    mkdir -p "$TMP_DIR"
-    cp /etc/hosts "$TMP_DIR/hosts.backup.$(date +%s)" || {
-        log "Warnung: Konnte keine Sicherung von /etc/hosts erstellen"
-    }
-
-    # Prüfe, ob die Datei beschreibbar ist
-    if [ ! -w "/etc/hosts" ]; then
-        log "Warnung: /etc/hosts ist nicht beschreibbar, versuche Berechtigungen zu ändern"
-        chmod u+w /etc/hosts || {
-            log "Fehler: Konnte Berechtigungen für /etc/hosts nicht ändern"
-            notify warn "⚠️ Hostname-Konfiguration fehlgeschlagen"
-            return 1
-        }
-    fi
-
-    # Versuche, die Datei zu bearbeiten
-    {
-        # Alte Einträge bereinigen
-        sed -i "/^127\.0\.0\.1.*$NEW_HOSTNAME/d" /etc/hosts
-        sed -i "/^::1.*$NEW_HOSTNAME/d" /etc/hosts
-
-        # Neue Einträge hinzufügen
-        if ! grep -q "127.0.0.1.*$NEW_HOSTNAME" /etc/hosts; then
-            sed -i "/^127.0.0.1/s/$/ $NEW_HOSTNAME/" /etc/hosts || \
-            echo "127.0.0.1 localhost $NEW_HOSTNAME" >> /etc/hosts
-        fi
-
-        if ! grep -q "::1.*$NEW_HOSTNAME" /etc/hosts; then
-            sed -i "/^::1/s/$/ $NEW_HOSTNAME/" /etc/hosts || \
-            echo "::1 localhost $NEW_HOSTNAME" >> /etc/hosts
-        fi
-
-    } || {
-        log "Fehler: Konnte /etc/hosts nicht aktualisieren"
-        notify warn "⚠️ Hostname-Konfiguration fehlgeschlagen"
-        return 1
-    }
-
-    log "Hostname aktualisiert und in /etc/hosts eingetragen: $NEW_HOSTNAME"
-    return 0
-}
 # Systeminformationen sammeln
 get_system_info() {
     log "Erfasse detaillierte Systeminformationen"
@@ -274,7 +241,6 @@ get_system_info() {
     
     log "Systeminfo: $DISTRO | $OS_INFO | $CPU_CORES Cores | $MEMORY MB RAM | $DISK_SPACE frei"
 }
-
 # Temporäres Verzeichnis erstellen
 create_temp_dir() {
     mkdir -p "$TMP_DIR" || {
@@ -328,7 +294,6 @@ check_internet() {
     log "Internetverbindung verfügbar"
     return 0
 }
-
 # Abhängigkeiten installieren
 install_dependencies() {
     log "Prüfe Systemabhängigkeiten"
@@ -466,7 +431,6 @@ setup_ssh_key() {
     
     return 0
 }
-
 # Systemaktualisierung
 update_system() {
     log "Führe Systemaktualisierung durch"
@@ -507,6 +471,7 @@ update_system() {
     log "Systemaktualisierung abgeschlossen"
     return 0
 }
+
 # Docker installieren
 install_docker() {
     log "Installiere Docker"
@@ -629,7 +594,6 @@ install_docker_compose() {
     log "Docker Compose erfolgreich installiert"
     return 0
 }
-
 # Globalping-Probe installieren und konfigurieren
 install_globalping_probe() {
     log "Prüfe Globalping-Probe Status"
@@ -742,7 +706,6 @@ EOF
     
     return 0
 }
-
 # Erstelle Wartungsskript für Globalping
 create_globalping_maintenance() {
     log "Erstelle Globalping-Wartungsskript"
@@ -1020,7 +983,6 @@ run_self_diagnosis() {
         return 1
     fi
 }
-
 # Netzwerk-Diagnose durchführen
 run_network_diagnosis() {
     log "Führe Netzwerk-Diagnose durch"
@@ -1205,7 +1167,10 @@ main() {
     install_dependencies || log "Warnung: Installation der Abhängigkeiten fehlgeschlagen"
     update_system || log "Warnung: Systemaktualisierung fehlgeschlagen"
     get_system_info
-    manage_hostname || log "Warnung: Hostname-Konfiguration fehlgeschlagen"
+    
+    # Verwende die neue Hostname-Konfiguration
+    configure_hostname || log "Warnung: Hostname-Konfiguration fehlgeschlagen"
+    
     setup_ssh_key || log "Warnung: SSH-Schlüssel-Setup fehlgeschlagen"
     
     # Aktiviere Ubuntu Pro nur auf Ubuntu-Systemen
