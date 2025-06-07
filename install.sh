@@ -3330,10 +3330,3 @@ fi
 # ===========================================
 # END OF ENHANCED SCRIPT
 # ===========================================
-
-# Erweiterte Version-Info
-# Version: 2025.06.07-enhanced
-# Features: Erweiterte Automatisierung, intelligente Swap-Konfiguration,
-#           robuste Fehlerbehandlung, erweiterte Telegram-Benachrichtigungen,
-#           CPU-Hang-Schutz, automatische Reboots, absolute Speicherplatz-Schwellwerte
-# Kompatibilität: Ubuntu 18.04+, Debian 9+, RHEL/CentOS 7+, Rocky/Alma 8+, Fedora 30+
