@@ -13,7 +13,9 @@ SCRIPT_URL="https://raw.githubusercontent.com/gbzret4d/globalping-update-script/
 SCRIPT_PATH="/usr/local/bin/install_globalping.sh"
 CRON_JOB="0 0 * * 0 /usr/local/bin/globalping-maintenance"
 AUTO_UPDATE_CRON="0 0 * * 0 /usr/local/bin/install_globalping.sh --auto-update"
-SCRIPT_VERSION="2023.10.21"
+SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
+SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
+SCRIPT_VERSION="2023.10.22"
 
 # =============================================
 # FUNKTIONEN
@@ -184,6 +186,400 @@ configure_hostname() {
     log "Hostname erfolgreich konfiguriert: $NEW_HOSTNAME"
     return 0
 }
+# Zufälliges Zeitoffset für verteilte Updates generieren
+generate_random_offset() {
+    # Generiere eine zufällige Verschiebung im Bereich ±24 Stunden (±1440 Minuten)
+    # Ergebnis ist ein String im Format "H:M", z.B. "13:45" oder "-10:30"
+    local offset_minutes=$(( (RANDOM % 2881) - 1440 ))
+    local abs_minutes=${offset_minutes#-}
+    local sign=""
+    
+    if [ $offset_minutes -lt 0 ]; then
+        sign="-"
+    fi
+    
+    local hours=$(( abs_minutes / 60 ))
+    local minutes=$(( abs_minutes % 60 ))
+    
+    echo "${sign}${hours}:${minutes}"
+}
+
+# Prüfen, ob crontab verfügbar ist
+check_crontab_available() {
+    if command -v crontab >/dev/null; then
+        # Prüfe, ob crontab schreibbar ist
+        if crontab -l >/dev/null 2>&1 || [ $? -eq 1 ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Prüfen, ob systemd verfügbar ist
+check_systemd_available() {
+    if command -v systemctl >/dev/null && [ -d /etc/systemd/system ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Prüfen, ob der at-Dienst verfügbar ist
+check_at_available() {
+    if command -v at >/dev/null && (systemctl is-active atd >/dev/null 2>&1 || [ -x /etc/init.d/atd ]); then
+        return 0
+    fi
+    return 1
+}
+
+# Prüfen, ob der anacron-Dienst verfügbar ist
+check_anacron_available() {
+    if [ -d /etc/cron.weekly ] && [ -w /etc/cron.weekly ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Auto-Update-Funktion - implementiert mehrere Scheduling-Optionen
+setup_auto_update() {
+    log "Richte automatische Skript-Updates ein"
+    
+    # Erstelle Kopie des aktuellen Skripts im Zielpfad
+    if [ "$0" != "$SCRIPT_PATH" ]; then
+        cp "$0" "$SCRIPT_PATH"
+        chmod +x "$SCRIPT_PATH"
+        log "Skript in $SCRIPT_PATH installiert"
+    fi
+    
+    # Zufälliges Zeitoffset für verteilte Updates
+    local time_offset=$(generate_random_offset)
+    log "Zufälliges Zeitoffset für Updates: $time_offset"
+    
+    # Entferne alte Auto-Update-Mechanismen
+    remove_old_update_schedulers
+    
+    # Versuche verschiedene Scheduling-Methoden, je nach Verfügbarkeit
+    local update_scheduled=false
+    
+    # Option 1: crontab
+    if check_crontab_available; then
+        if setup_crontab_update "$time_offset"; then
+            log "Auto-Update via crontab eingerichtet"
+            update_scheduled=true
+        fi
+    fi
+    
+    # Option 2: systemd timer
+    if [ "$update_scheduled" = "false" ] && check_systemd_available; then
+        if setup_systemd_timer "$time_offset"; then
+            log "Auto-Update via systemd timer eingerichtet"
+            update_scheduled=true
+        fi
+    fi
+    
+    # Option 3: anacron (cron.weekly)
+    if [ "$update_scheduled" = "false" ] && check_anacron_available; then
+        if setup_anacron_update; then
+            log "Auto-Update via anacron eingerichtet"
+            update_scheduled=true
+        fi
+    fi
+    
+    # Option 4: at-Dienst (einmalig, plant sich selbst neu)
+    if [ "$update_scheduled" = "false" ] && check_at_available; then
+        if setup_at_update; then
+            log "Auto-Update via at-Dienst eingerichtet"
+            update_scheduled=true
+        fi
+    fi
+    
+    if [ "$update_scheduled" = "true" ]; then
+        notify info "🔄 Automatische Updates aktiviert (mit zufälligem Zeitoffset)"
+    else
+        log "Warnung: Konnte keinen Auto-Update-Mechanismus einrichten"
+        notify warn "⚠️ Auto-Update konnte nicht eingerichtet werden"
+    fi
+    
+    log "Auto-Update-Einrichtung abgeschlossen"
+    return 0
+}
+
+# Alte Update-Scheduler entfernen
+remove_old_update_schedulers() {
+    log "Entferne alte Auto-Update-Mechanismen..."
+    
+    # Entferne alten crontab-Eintrag (nur den für dieses Skript)
+    if check_crontab_available; then
+        # Sichere aktuelle crontab
+        crontab -l > "$TMP_DIR/current_crontab" 2>/dev/null || echo "" > "$TMP_DIR/current_crontab"
+        
+        # Entferne alte Update-Einträge und behalte andere Einträge
+        grep -v "install_globalping.*--auto-update" "$TMP_DIR/current_crontab" > "$TMP_DIR/new_crontab"
+        
+        # Installiere bereinigte crontab
+        crontab "$TMP_DIR/new_crontab" 2>/dev/null
+        log "Alte crontab-Einträge bereinigt"
+    fi
+    
+    # Entferne systemd timer und service, falls vorhanden
+    if check_systemd_available; then
+        if [ -f "$SYSTEMD_TIMER_PATH" ]; then
+            systemctl stop globalping-update.timer >/dev/null 2>&1 || true
+            systemctl disable globalping-update.timer >/dev/null 2>&1 || true
+            rm -f "$SYSTEMD_TIMER_PATH"
+            log "Alter systemd timer entfernt"
+        fi
+        
+        if [ -f "$SYSTEMD_SERVICE_PATH" ]; then
+            systemctl stop globalping-update.service >/dev/null 2>&1 || true
+            systemctl disable globalping-update.service >/dev/null 2>&1 || true
+            rm -f "$SYSTEMD_SERVICE_PATH"
+            log "Alter systemd service entfernt"
+        fi
+        
+        # Lade systemd Units neu
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    
+    # Entferne anacron-Skript, falls vorhanden
+    if [ -f "/etc/cron.weekly/globalping-update" ]; then
+        rm -f "/etc/cron.weekly/globalping-update"
+        log "Altes anacron-Skript entfernt"
+    fi
+    
+    # at-Jobs können nicht einfach identifiziert und entfernt werden,
+    # das neue at-Job überschreibt einfach den vorherigen Plan
+}
+
+# Crontab-Update einrichten
+setup_crontab_update() {
+    local time_offset="$1"
+    local base_hour=0
+    local base_minute=0
+    local target_hour base_minute_offset sign
+    
+    # Parsen des Zeitoffsets
+    if [[ "$time_offset" =~ ^(-?)([0-9]+):([0-9]+)$ ]]; then
+        sign="${BASH_REMATCH[1]}"
+        hour_offset="${BASH_REMATCH[2]}"
+        minute_offset="${BASH_REMATCH[3]}"
+        
+        # Berechne neue Zielzeit
+        if [ "$sign" = "-" ]; then
+            # Negative Verschiebung
+            base_minute_offset=$(( base_minute - minute_offset ))
+            while [ $base_minute_offset -lt 0 ]; do
+                base_minute_offset=$(( base_minute_offset + 60 ))
+                hour_offset=$(( hour_offset + 1 ))
+            done
+            target_hour=$(( (base_hour - hour_offset + 24) % 24 ))
+        else
+            # Positive Verschiebung
+            base_minute_offset=$(( base_minute + minute_offset ))
+            target_hour=$(( (base_hour + hour_offset + (base_minute_offset / 60)) % 24 ))
+            base_minute_offset=$(( base_minute_offset % 60 ))
+        fi
+    else
+        # Fallback, falls Offset-Parsing fehlschlägt
+        target_hour=$base_hour
+        base_minute_offset=$base_minute
+    fi
+    
+    # Erstelle crontab-Eintrag
+    local crontab_entry="$base_minute_offset $target_hour * * 0 $SCRIPT_PATH --auto-update"
+    
+    # Sichere aktuelle crontab
+    crontab -l > "$TMP_DIR/current_crontab" 2>/dev/null || echo "" > "$TMP_DIR/current_crontab"
+    
+    # Entferne alte Update-Einträge
+    grep -v "install_globalping.*--auto-update" "$TMP_DIR/current_crontab" > "$TMP_DIR/new_crontab"
+    
+    # Füge neuen Eintrag hinzu
+    echo "$crontab_entry" >> "$TMP_DIR/new_crontab"
+    
+    # Installiere neue crontab
+    if crontab "$TMP_DIR/new_crontab" 2>/dev/null; then
+        log "Crontab-Update eingerichtet: $crontab_entry"
+        return 0
+    else
+        log "Fehler: Konnte crontab nicht aktualisieren"
+        return 1
+    fi
+}
+
+# Systemd-Timer einrichten
+setup_systemd_timer() {
+    local time_offset="$1"
+    local base_time="00:00"
+    local target_time
+    
+    # Berechne Zielzeit basierend auf Offset
+    if [[ "$time_offset" =~ ^(-?)([0-9]+):([0-9]+)$ ]]; then
+        sign="${BASH_REMATCH[1]}"
+        hours="${BASH_REMATCH[2]}"
+        minutes="${BASH_REMATCH[3]}"
+        
+        if [ "$sign" = "-" ]; then
+            # Zeit-Arithmetik für negative Offsets ist komplex
+            # Verwende einfachen Fallback
+            target_time="Sun *-*-* 00:00:00"
+        else
+            # Für positive Offsets einfacher
+            target_time="Sun *-*-* ${hours}:${minutes}:00"
+        fi
+    else
+        # Fallback
+        target_time="Sun *-*-* 00:00:00"
+    fi
+    
+    # Erstelle Service-Datei
+    cat > "$SYSTEMD_SERVICE_PATH" << EOF
+[Unit]
+Description=Globalping Installation Auto-Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_PATH --auto-update
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # Erstelle Timer-Datei
+    cat > "$SYSTEMD_TIMER_PATH" << EOF
+[Unit]
+Description=Weekly Globalping Installation Auto-Update
+After=network-online.target
+
+[Timer]
+OnCalendar=$target_time
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    
+    # Aktiviere und starte Timer
+    systemctl daemon-reload >/dev/null 2>&1
+    if systemctl enable globalping-update.timer >/dev/null 2>&1 && \
+       systemctl start globalping-update.timer >/dev/null 2>&1; then
+        log "Systemd-Timer erfolgreich eingerichtet: $target_time"
+        return 0
+    else
+        log "Fehler: Konnte systemd-Timer nicht einrichten"
+        return 1
+    fi
+}
+
+# Anacron (cron.weekly) einrichten
+setup_anacron_update() {
+    # Erstelle wöchentliches Skript
+    cat > "/etc/cron.weekly/globalping-update" << EOF
+#!/bin/bash
+# Zufällige Verzögerung zwischen 0-24 Stunden (0-86400 Sekunden)
+DELAY=\$(( RANDOM % 86400 ))
+sleep \$DELAY
+$SCRIPT_PATH --auto-update
+EOF
+    
+    chmod +x "/etc/cron.weekly/globalping-update"
+    
+    if [ -x "/etc/cron.weekly/globalping-update" ]; then
+        log "Anacron-Update-Skript erfolgreich eingerichtet"
+        return 0
+    else
+        log "Fehler: Konnte Anacron-Update-Skript nicht einrichten"
+        return 1
+    fi
+}
+
+# At-Job einrichten (selbst-erneuernd)
+setup_at_update() {
+    # Berechne Zeitpunkt in einer Woche mit zufälligem Offset
+    local offset_days=$(( RANDOM % 7 ))  # 0-6 Tage zusätzlicher Offset
+    local offset_hours=$(( RANDOM % 24 ))  # 0-23 Stunden zusätzlicher Offset
+    
+    # Erstelle at-Job, der das Update ausführt und sich dann neu plant
+    echo "$SCRIPT_PATH --auto-update" | at now + $(( 7 + offset_days )) days + $offset_hours hours 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        log "At-Job für Auto-Update erfolgreich geplant (in ~$(( 7 + offset_days )) Tagen)"
+        return 0
+    else
+        log "Fehler: Konnte at-Job nicht planen"
+        return 1
+    fi
+}
+
+# Auto-Update ausführen
+perform_auto_update() {
+    log "Führe automatisches Skript-Update durch"
+    
+    # Temporäre Datei für neue Version
+    local temp_script="$TMP_DIR/update_script.sh"
+    
+    # Aktuelle Version herunterladen
+    log "Lade neueste Version von $SCRIPT_URL herunter"
+    if ! curl -s -o "$temp_script" "$SCRIPT_URL"; then
+        log "Fehler: Konnte aktuelle Version nicht herunterladen"
+        notify error "❌ Auto-Update fehlgeschlagen: Download-Fehler"
+        return 1
+    fi
+    
+    # Prüfe, ob die heruntergeladene Datei ein gültiges Shell-Skript ist
+    if ! grep -q "#!/bin/bash" "$temp_script"; then
+        log "Fehler: Heruntergeladene Datei ist kein gültiges Shell-Skript"
+        notify error "❌ Auto-Update fehlgeschlagen: Ungültiges Skript"
+        return 1
+    fi
+    
+    # Versionsprüfung
+    local current_version=$(grep "^SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2)
+    local new_version=$(grep "^SCRIPT_VERSION=" "$temp_script" | cut -d'"' -f2)
+    
+    log "Aktuelle Version: $current_version"
+    log "Verfügbare Version: $new_version"
+    
+    # Prüfe, ob Update notwendig ist
+    if [ "$current_version" = "$new_version" ]; then
+        log "Bereits aktuellste Version installiert, überspringe Update"
+        return 0
+    fi
+    
+    # Sichere aktuelle Konfiguration
+    local token_vars=$(grep -E "^(ADOPTION_TOKEN|TELEGRAM_TOKEN|TELEGRAM_CHAT|UBUNTU_PRO_TOKEN|SSH_KEY)=" "$SCRIPT_PATH" || echo "")
+    
+    # Skript aktualisieren
+    cp "$temp_script" "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    
+    # Konfiguration wiederherstellen, falls vorhanden
+    if [ -n "$token_vars" ]; then
+        log "Stelle Konfigurationsvariablen wieder her"
+        for var_line in $token_vars; do
+            var_name=$(echo "$var_line" | cut -d'=' -f1)
+            # Ersetze Variablen im aktualisierten Skript
+            sed -i "s/^$var_name=.*/$var_line/" "$SCRIPT_PATH"
+        done
+    fi
+    
+    log "Skript erfolgreich auf Version $new_version aktualisiert"
+    notify success "✅ Auto-Update auf Version $new_version abgeschlossen"
+    
+    # Wenn Update über at-Job erfolgt, plane nächstes Update
+    if check_at_available && ! check_crontab_available && ! check_systemd_available && ! check_anacron_available; then
+        setup_at_update
+        log "Nächstes Update via at-Job geplant"
+    fi
+    
+    # Aufräumen
+    rm -f "$temp_script"
+    
+    return 0
+}
 # Ubuntu Pro Aktivierung
 ubuntu_pro_attach() {
     if [ -n "$UBUNTU_PRO_TOKEN" ] && grep -q "Ubuntu" /etc/os-release; then
@@ -241,6 +637,7 @@ get_system_info() {
     
     log "Systeminfo: $DISTRO | $OS_INFO | $CPU_CORES Cores | $MEMORY MB RAM | $DISK_SPACE frei"
 }
+
 # Temporäres Verzeichnis erstellen
 create_temp_dir() {
     mkdir -p "$TMP_DIR" || {
@@ -431,6 +828,7 @@ setup_ssh_key() {
     
     return 0
 }
+
 # Systemaktualisierung
 update_system() {
     log "Führe Systemaktualisierung durch"
@@ -471,7 +869,6 @@ update_system() {
     log "Systemaktualisierung abgeschlossen"
     return 0
 }
-
 # Docker installieren
 install_docker() {
     log "Installiere Docker"
@@ -706,6 +1103,7 @@ EOF
     
     return 0
 }
+
 # Erstelle Wartungsskript für Globalping
 create_globalping_maintenance() {
     log "Erstelle Globalping-Wartungsskript"
@@ -742,15 +1140,58 @@ EOF
     
     chmod +x /usr/local/bin/globalping-maintenance
     
-    # Cron-Job einrichten
-    if ! crontab -l | grep -q "globalping-maintenance"; then
-        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
-        log "Cron-Job für Globalping-Wartung eingerichtet"
+    # Cron-Job einrichten, bevorzugt mit crontab
+    if check_crontab_available; then
+        if ! crontab -l | grep -q "globalping-maintenance"; then
+            (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+            log "Cron-Job für Globalping-Wartung eingerichtet"
+        fi
+    # Alternative: systemd-Timer
+    elif check_systemd_available; then
+        cat > "/etc/systemd/system/globalping-maintenance.service" << EOF
+[Unit]
+Description=Globalping Probe Maintenance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/globalping-maintenance
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        cat > "/etc/systemd/system/globalping-maintenance.timer" << EOF
+[Unit]
+Description=Weekly Globalping Probe Maintenance
+After=network-online.target
+
+[Timer]
+OnCalendar=Sun *-*-* 00:00:00
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable --now globalping-maintenance.timer >/dev/null 2>&1
+        log "Systemd-Timer für Globalping-Wartung eingerichtet"
+    # Alternative: anacron
+    elif check_anacron_available; then
+        cat > "/etc/cron.weekly/globalping-maintenance" << EOF
+#!/bin/bash
+/usr/local/bin/globalping-maintenance
+EOF
+        chmod +x "/etc/cron.weekly/globalping-maintenance"
+        log "Anacron-Job für Globalping-Wartung eingerichtet"
     fi
     
     log "Globalping-Wartungsskript erstellt und eingerichtet"
 }
-
 # Globalping-Probe Status prüfen
 check_globalping_status() {
     log "Prüfe Status der Globalping-Probe"
@@ -802,6 +1243,7 @@ check_globalping_status() {
         return 1
     fi
 }
+
 # Architektur erkennen und anpassen
 detect_architecture() {
     log "Erkenne System-Architektur"
@@ -890,16 +1332,48 @@ EOF
         chmod +x /usr/local/bin/check-pi-temp
         
         # Cron-Job für stündliche Temperaturprüfung
-        if ! crontab -l | grep -q "check-pi-temp"; then
-            (crontab -l 2>/dev/null; echo "0 * * * * /usr/local/bin/check-pi-temp | logger -t pi-temp") | crontab -
-            log "Cron-Job für Temperaturüberwachung eingerichtet"
+        if check_crontab_available; then
+            if ! crontab -l | grep -q "check-pi-temp"; then
+                (crontab -l 2>/dev/null; echo "0 * * * * /usr/local/bin/check-pi-temp | logger -t pi-temp") | crontab -
+                log "Cron-Job für Temperaturüberwachung eingerichtet"
+            fi
+        elif check_systemd_available; then
+            # Alternative mit systemd
+            cat > "/etc/systemd/system/pi-temp-check.service" << EOF
+[Unit]
+Description=Raspberry Pi Temperature Check
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/check-pi-temp
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+            cat > "/etc/systemd/system/pi-temp-check.timer" << EOF
+[Unit]
+Description=Run Raspberry Pi Temperature Check hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+
+            systemctl daemon-reload >/dev/null 2>&1
+            systemctl enable --now pi-temp-check.timer >/dev/null 2>&1
+            log "Systemd-Timer für Temperaturüberwachung eingerichtet"
         fi
     fi
     
     log "Raspberry Pi-Optimierungen abgeschlossen"
     return 0
 }
-
 # Selbstdiagnose durchführen
 run_self_diagnosis() {
     log "Führe Selbstdiagnose durch"
@@ -968,6 +1442,22 @@ run_self_diagnosis() {
         fi
     fi
     
+    # 8. Auto-Update-Mechanismus prüfen
+    log "Prüfe Auto-Update-Konfiguration..."
+    local update_mechanism_found=false
+    
+    if check_crontab_available && crontab -l 2>/dev/null | grep -q "install_globalping.*--auto-update"; then
+        update_mechanism_found=true
+    elif check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
+        update_mechanism_found=true
+    elif [ -x "/etc/cron.weekly/globalping-update" ]; then
+        update_mechanism_found=true
+    fi
+    
+    if [ "$update_mechanism_found" = "false" ]; then
+        issues+=("Kein aktiver Auto-Update-Mechanismus gefunden")
+    fi
+    
     # Ergebnisse anzeigen
     if [ ${#issues[@]} -eq 0 ]; then
         log "Selbstdiagnose abgeschlossen: Keine Probleme gefunden"
@@ -983,6 +1473,7 @@ run_self_diagnosis() {
         return 1
     fi
 }
+
 # Netzwerk-Diagnose durchführen
 run_network_diagnosis() {
     log "Führe Netzwerk-Diagnose durch"
@@ -1128,6 +1619,16 @@ run_diagnostics() {
         tail -n 1000 /var/log/syslog > "$diag_dir/syslog.txt"
     fi
     
+    # Auto-Update-Konfiguration prüfen
+    log "Prüfe Auto-Update-Konfiguration..."
+    if check_crontab_available; then
+        crontab -l > "$diag_dir/crontab.txt" 2>&1
+    fi
+    
+    if check_systemd_available; then
+        systemctl list-timers > "$diag_dir/systemd-timers.txt" 2>&1
+    fi
+    
     # Ergebnis-Archiv erstellen
     local archive_file="/root/globalping-diagnostics-$(date +%Y%m%d-%H%M%S).tar.gz"
     tar -czf "$archive_file" -C "$(dirname "$diag_dir")" "$(basename "$diag_dir")"
@@ -1142,7 +1643,7 @@ run_diagnostics() {
 }
 # Erstelle Hauptfunktion
 main() {
-    log "Starte Server-Setup-Skript"
+    log "Starte Server-Setup-Skript (Version $SCRIPT_VERSION)"
     
     # Prüfe Root-Rechte
     if [ "$(id -u)" -ne 0 ]; then
@@ -1187,6 +1688,9 @@ main() {
         log "Kein Adoption-Token angegeben, überspringe Globalping-Probe-Installation"
     fi
     
+    # Auto-Update einrichten
+    setup_auto_update || log "Warnung: Auto-Update-Einrichtung fehlgeschlagen"
+    
     # Führe Diagnose durch
     run_diagnostics
     
@@ -1207,6 +1711,7 @@ create_summary() {
     {
         echo "=== SERVER SETUP ZUSAMMENFASSUNG ==="
         echo "Datum: $(date)"
+        echo "Skript-Version: $SCRIPT_VERSION"
         echo "Hostname: $(hostname)"
         echo "IP-Adressen:"
         ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | sort
@@ -1228,6 +1733,19 @@ create_summary() {
         echo "Docker: $(if command -v docker >/dev/null; then echo "Ja ($(docker --version))"; else echo "Nein"; fi)"
         echo "Docker Compose: $(if command -v docker-compose >/dev/null; then echo "Ja ($(docker-compose --version))"; else echo "Nein"; fi)"
         echo "Globalping-Probe: $(if docker ps | grep -q globalping-probe; then echo "Ja (Aktiv)"; elif docker ps -a | grep -q globalping-probe; then echo "Ja (Inaktiv)"; else echo "Nein"; fi)"
+        
+        echo -e "\n--- AUTO-UPDATE STATUS ---"
+        if check_crontab_available && crontab -l 2>/dev/null | grep -q "install_globalping.*--auto-update"; then
+            echo "Auto-Update: Aktiv (via crontab)"
+        elif check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
+            echo "Auto-Update: Aktiv (via systemd timer)"
+        elif [ -x "/etc/cron.weekly/globalping-update" ]; then
+            echo "Auto-Update: Aktiv (via anacron)"
+        elif check_at_available; then
+            echo "Auto-Update: Konfiguriert (via at-Dienst)"
+        else
+            echo "Auto-Update: Nicht aktiv"
+        fi
         
         echo -e "\n--- OFFENE PORTS ---"
         if command -v netstat >/dev/null; then
@@ -1283,6 +1801,7 @@ process_args() {
     # Standardwerte
     INSTALL_DOCKER="false"
     RUN_DIAGNOSTICS_ONLY="false"
+    AUTO_UPDATE="false"
     
     # Argumente verarbeiten
     while [ $# -gt 0 ]; do
@@ -1371,7 +1890,16 @@ process_args() {
     # Wenn nur Diagnose ausgeführt werden soll
     if [ "$RUN_DIAGNOSTICS_ONLY" = "true" ]; then
         check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
+        create_temp_dir
         run_diagnostics
+        exit 0
+    fi
+    
+    # Wenn Auto-Update ausgeführt werden soll
+    if [ "$AUTO_UPDATE" = "true" ]; then
+        check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
+        create_temp_dir
+        perform_auto_update
         exit 0
     fi
 }
