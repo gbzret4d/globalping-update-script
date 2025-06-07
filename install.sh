@@ -56,11 +56,11 @@ get_enhanced_system_info() {
     log "Sammle erweiterte Systeminformationen"
     
     # Öffentliche IP ermitteln
-    PUBLIC_IP=$(timeout "${TIMEOUT_NETWORK}" curl -s https://api.ipify.org 2>/dev/null || echo "unknown")
+    PUBLIC_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "unknown")
     
     # Geo-Informationen sammeln
     local ipinfo_response
-    ipinfo_response=$(timeout "${TIMEOUT_NETWORK}" curl -s "https://ipinfo.io/json" 2>/dev/null || echo "")
+    ipinfo_response=$(curl -s "https://ipinfo.io/json" 2>/dev/null || echo "")
     
     if [[ -n "${ipinfo_response}" ]] && echo "${ipinfo_response}" | grep -q '"country"'; then
         COUNTRY=$(echo "${ipinfo_response}" | grep -o '"country": *"[^"]*"' | cut -d'"' -f4 | head -1)
@@ -131,7 +131,7 @@ ${message}"
     # Sende Nachricht mit Retry-Logik
     local attempt=0
     while [[ ${attempt} -lt 3 ]]; do
-        if timeout "${TIMEOUT_NETWORK}" curl -s -X POST "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" \
+        if curl -s -X POST "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" \
             -d "chat_id=${TELEGRAM_CHAT}" \
             -d "text=${escaped_message}" \
             -d "parse_mode=MarkdownV2" >/dev/null 2>&1; then
@@ -271,12 +271,12 @@ install_sudo() {
     log "Installiere sudo"
     
     if command -v apt-get >/dev/null 2>&1; then
-        timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || true
-        timeout "${TIMEOUT_PACKAGE}" apt-get install -y sudo >/dev/null 2>&1
+        apt-get update >/dev/null 2>&1 || true
+        apt-get install -y sudo >/dev/null 2>&1
     elif command -v dnf >/dev/null 2>&1; then
-        timeout "${TIMEOUT_PACKAGE}" dnf install -y sudo >/dev/null 2>&1
+        dnf install -y sudo >/dev/null 2>&1
     elif command -v yum >/dev/null 2>&1; then
-        timeout "${TIMEOUT_PACKAGE}" yum install -y sudo >/dev/null 2>&1
+        yum install -y sudo >/dev/null 2>&1
     else
         enhanced_log "WARN" "Kein unterstützter Paketmanager für sudo-Installation gefunden"
         return 1
@@ -329,25 +329,25 @@ ubuntu_pro_attach() {
         
         # Ubuntu Advantage Tools installieren
         if ! command -v ua >/dev/null 2>&1; then
-            timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || true
-            timeout "${TIMEOUT_PACKAGE}" apt-get install -y ubuntu-advantage-tools >/dev/null 2>&1 || {
+            apt-get update >/dev/null 2>&1 || true
+            apt-get install -y ubuntu-advantage-tools >/dev/null 2>&1 || {
                 enhanced_log "ERROR" "Konnte ubuntu-advantage-tools nicht installieren"
                 return 1
             }
         fi
 
         # Token anwenden
-        if timeout "${TIMEOUT_GENERAL}" ua attach "${UBUNTU_PRO_TOKEN}" >/dev/null 2>&1; then
+        if ua attach "${UBUNTU_PRO_TOKEN}" >/dev/null 2>&1; then
             enhanced_log "INFO" "Ubuntu Pro Token erfolgreich aktiviert"
             
             # ESM und Sicherheitsupdates aktivieren
-            timeout "${TIMEOUT_GENERAL}" ua enable esm-apps >/dev/null 2>&1 || true
-            timeout "${TIMEOUT_GENERAL}" ua enable esm-infra >/dev/null 2>&1 || true
-            timeout "${TIMEOUT_GENERAL}" ua enable livepatch >/dev/null 2>&1 || true
+            ua enable esm-apps >/dev/null 2>&1 || true
+            ua enable esm-infra >/dev/null 2>&1 || true
+            ua enable livepatch >/dev/null 2>&1 || true
             
             # System aktualisieren
-            timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || true
-            timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1 || true
+            apt-get update >/dev/null 2>&1 || true
+            apt-get upgrade -y >/dev/null 2>&1 || true
             
             enhanced_log "INFO" "Ubuntu Pro mit ESM/Livepatch aktiviert"
             return 0
@@ -435,10 +435,10 @@ install_dependencies() {
     
     if [[ "${is_debian_based}" == "true" ]] && command -v apt-get >/dev/null 2>&1; then
         # Debian/Ubuntu
-        timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+        apt-get update >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
         }
-        timeout "${TIMEOUT_PACKAGE}" apt-get install -y \
+        apt-get install -y \
             curl wget awk sed grep coreutils bc \
             lsb-release iproute2 systemd >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
@@ -446,14 +446,14 @@ install_dependencies() {
         }
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
-            timeout "${TIMEOUT_PACKAGE}" dnf install -y \
+            dnf install -y \
                 curl wget gawk sed grep coreutils bc \
                 redhat-lsb-core iproute >/dev/null 2>&1 || {
                 enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
                 return 1
             }
         elif command -v yum >/dev/null 2>&1; then
-            timeout "${TIMEOUT_PACKAGE}" yum install -y \
+            yum install -y \
                 curl wget gawk sed grep coreutils bc \
                 redhat-lsb-core iproute >/dev/null 2>&1 || {
                 enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
@@ -486,19 +486,19 @@ update_system() {
     fi
     
     if [[ "${is_debian_based}" == "true" ]] && command -v apt-get >/dev/null 2>&1; then
-        timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+        apt-get update >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
         }
-        timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1 || {
+        apt-get upgrade -y >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get upgrade fehlgeschlagen"
         }
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
-            timeout "${TIMEOUT_PACKAGE}" dnf update -y >/dev/null 2>&1 || {
+            dnf update -y >/dev/null 2>&1 || {
                 enhanced_log "WARN" "dnf update fehlgeschlagen"
             }
         elif command -v yum >/dev/null 2>&1; then
-            timeout "${TIMEOUT_PACKAGE}" yum update -y >/dev/null 2>&1 || {
+            yum update -y >/dev/null 2>&1 || {
                 enhanced_log "WARN" "yum update fehlgeschlagen"
             }
         else
@@ -702,7 +702,7 @@ configure_smart_swap() {
     # Erstelle Swap-Datei
     local swap_file="/swapfile"
     
-    if ! timeout "${TIMEOUT_GENERAL}" dd if=/dev/zero of="${swap_file}" bs=1M count="${swap_size_mb}" 2>/dev/null; then
+    if ! dd if=/dev/zero of="${swap_file}" bs=1M count="${swap_size_mb}" 2>/dev/null; then
         enhanced_log "ERROR" "Konnte Swap-Datei nicht erstellen"
         return 1
     fi
@@ -733,7 +733,7 @@ configure_smart_swap() {
     log "Swap erfolgreich konfiguriert: ${swap_size_mb}MB"
     return 0
 }
-# Prüfung auf kritische Updates und Reboot-Notwendigkeit
+# Prüfung auf kritische Updates und Reboot-Notwendigkeit (KORRIGIERT)
 check_critical_updates() {
     log "Prüfe auf kritische Updates"
     
@@ -742,31 +742,31 @@ check_critical_updates() {
     # Für Debian/Ubuntu
     if command -v apt-get >/dev/null 2>&1; then
         # Aktualisiere Paketlisten
-        timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+        if ! timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1; then
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
             return 0
-        }
+        fi
         
         # Prüfe auf Kernel-Updates
-        local kernel_updates
-        kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image\|linux-generic\|linux-headers" || echo "0")
+        local kernel_updates=0
+        kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image\|linux-generic\|linux-headers" 2>/dev/null || echo "0")
         
-        if [[ ${kernel_updates} -gt 0 ]]; then
+        if [[ "${kernel_updates}" -gt 0 ]]; then
             log "Kernel-Updates gefunden: ${kernel_updates}"
             needs_reboot=true
         fi
         
-        # Prüfe auf kritische System-Updates
-        local critical_updates
-        critical_updates=$(apt list --upgradable 2>/dev/null | grep -c "systemd\|libc6\|openssh\|glibc" || echo "0")
+        # Prüfe auf kritische System-Updates  
+        local critical_updates=0
+        critical_updates=$(apt list --upgradable 2>/dev/null | grep -c "systemd\|libc6\|openssh\|glibc" 2>/dev/null || echo "0")
         
-        if [[ ${critical_updates} -gt 0 ]]; then
+        if [[ "${critical_updates}" -gt 0 ]]; then
             log "Kritische System-Updates gefunden: ${critical_updates}"
             needs_reboot=true
         fi
         
         # Führe Updates durch
-        if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]]; then
+        if [[ "${kernel_updates}" -gt 0 ]] || [[ "${critical_updates}" -gt 0 ]]; then
             log "Installiere kritische Updates..."
             if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
                 log "Updates erfolgreich installiert"
@@ -778,10 +778,10 @@ check_critical_updates() {
         
     # Für RHEL/CentOS/Fedora
     elif command -v dnf >/dev/null 2>&1; then
-        local kernel_updates
-        kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" || echo "0")
+        local kernel_updates=0
+        kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" 2>/dev/null || echo "0")
         
-        if [[ ${kernel_updates} -gt 0 ]]; then
+        if [[ "${kernel_updates}" -gt 0 ]]; then
             log "Kernel-Updates gefunden, installiere..."
             if timeout "${TIMEOUT_PACKAGE}" dnf update -y kernel* >/dev/null 2>&1; then
                 needs_reboot=true
@@ -901,7 +901,7 @@ install_enhanced_globalping_probe() {
     # Docker-Installation prüfen
     if ! command -v docker >/dev/null 2>&1; then
         log "Docker wird für Globalping-Probe benötigt"
-        if ! timeout "${TIMEOUT_DOCKER}" install_docker; then
+        if ! install_docker; then
             enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
             enhanced_notify "error" "Docker-Installation" "Docker konnte nicht installiert werden"
             return 1
@@ -1055,18 +1055,18 @@ start_enhanced_globalping_probe() {
     
     # Ziehe neuestes Image mit Timeout
     log "Lade neuestes Globalping-Probe Image..."
-    if ! timeout "${TIMEOUT_DOCKER}" docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
+    if ! docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
         enhanced_log "WARN" "Konnte neuestes Image nicht laden, verwende lokales"
     fi
     
     # Starte mit Docker Compose
     if command -v docker-compose >/dev/null 2>&1; then
-        if ! timeout "${TIMEOUT_DOCKER}" docker-compose -f "${compose_file}" up -d; then
+        if ! docker-compose -f "${compose_file}" up -d; then
             enhanced_log "ERROR" "Docker Compose-Start fehlgeschlagen"
             return 1
         fi
     elif docker compose version >/dev/null 2>&1; then
-        if ! timeout "${TIMEOUT_DOCKER}" docker compose -f "${compose_file}" up -d; then
+        if ! docker compose -f "${compose_file}" up -d; then
             enhanced_log "ERROR" "Docker Compose-Start fehlgeschlagen"
             return 1
         fi
@@ -1268,7 +1268,7 @@ perform_enhanced_globalping_maintenance() {
     local current_image_id latest_image_id
     current_image_id=$(docker inspect -f '{{.Image}}' "${container_name}" 2>/dev/null || echo "")
     
-    if timeout "${TIMEOUT_DOCKER}" docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
+    if docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
         latest_image_id=$(docker images --format "{{.ID}}" ghcr.io/jsdelivr/globalping-probe:latest 2>/dev/null | head -1 || echo "")
         
         if [[ -n "${current_image_id}" && -n "${latest_image_id}" && "${current_image_id}" != "${latest_image_id}" ]]; then
@@ -1379,14 +1379,14 @@ perform_enhanced_system_cleanup() {
         # Entferne ungenutzte Images (außer Globalping)
         docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | \
             grep -v globalping | awk '{print $2}' | \
-            xargs -r timeout "${TIMEOUT_CLEANUP}" docker rmi >/dev/null 2>&1 || true
+            xargs -r docker rmi >/dev/null 2>&1 || true
         
         # Entferne ungenutzte Volumes (außer Globalping)
         docker volume ls -q | grep -v globalping | \
-            xargs -r timeout "${TIMEOUT_CLEANUP}" docker volume rm >/dev/null 2>&1 || true
+            xargs -r docker volume rm >/dev/null 2>&1 || true
         
         # System-Prune (außer Globalping)
-        timeout "${TIMEOUT_CLEANUP}" docker system prune -f >/dev/null 2>&1 || true
+        docker system prune -f >/dev/null 2>&1 || true
     fi
     
     # Paketmanager-Cache bereinigen
@@ -1421,22 +1421,22 @@ cleanup_package_cache_enhanced() {
     log "Bereinige Paketmanager-Cache erweitert"
     
     if command -v apt-get >/dev/null 2>&1; then
-        timeout "${TIMEOUT_CLEANUP}" apt-get clean >/dev/null 2>&1 || true
-        timeout "${TIMEOUT_CLEANUP}" apt-get autoclean >/dev/null 2>&1 || true
-        timeout "${TIMEOUT_CLEANUP}" apt-get autoremove -y >/dev/null 2>&1 || true
+        apt-get clean >/dev/null 2>&1 || true
+        apt-get autoclean >/dev/null 2>&1 || true
+        apt-get autoremove -y >/dev/null 2>&1 || true
         
         # Entferne alte Archive
         rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
         rm -rf /var/lib/apt/lists/* 2>/dev/null || true
         
     elif command -v dnf >/dev/null 2>&1; then
-        timeout "${TIMEOUT_CLEANUP}" dnf clean all >/dev/null 2>&1 || true
-        timeout "${TIMEOUT_CLEANUP}" dnf autoremove -y >/dev/null 2>&1 || true
+        dnf clean all >/dev/null 2>&1 || true
+        dnf autoremove -y >/dev/null 2>&1 || true
         rm -rf /var/cache/dnf/* 2>/dev/null || true
         
     elif command -v yum >/dev/null 2>&1; then
-        timeout "${TIMEOUT_CLEANUP}" yum clean all >/dev/null 2>&1 || true
-        timeout "${TIMEOUT_CLEANUP}" yum autoremove -y >/dev/null 2>&1 || true
+        yum clean all >/dev/null 2>&1 || true
+        yum autoremove -y >/dev/null 2>&1 || true
         rm -rf /var/cache/yum/* 2>/dev/null || true
     fi
 }
@@ -1555,7 +1555,7 @@ setup_enhanced_auto_update() {
     if [[ -z "${current_script}" || ! -f "${current_script}" ]]; then
         log "Lade Skript für Auto-Update herunter..."
         current_script="${TMP_DIR}/downloaded_install.sh"
-        if ! timeout "${TIMEOUT_NETWORK}" curl -s -o "${current_script}" "${SCRIPT_URL}"; then
+        if ! curl -s -o "${current_script}" "${SCRIPT_URL}"; then
             enhanced_log "ERROR" "Konnte Skript nicht herunterladen"
             return 1
         fi
@@ -1732,7 +1732,7 @@ perform_enhanced_auto_update() {
     while [[ ${download_attempts} -lt ${max_attempts} ]]; do
         ((download_attempts++))
         
-        if timeout "${TIMEOUT_NETWORK}" curl -sL --connect-timeout 10 \
+        if curl -sL --connect-timeout 10 \
            -o "${temp_script}" "${SCRIPT_URL}"; then
             log "Download erfolgreich (Versuch ${download_attempts})"
             break
@@ -2234,37 +2234,37 @@ run_enhanced_diagnostics() {
     
     # 1. HARDWARE-ANALYSE
     echo -e "\n[DIAGNOSE] Hardware-Analyse"
-    timeout "${TIMEOUT_GENERAL}" analyze_hardware_enhanced issues warnings info_items
+    analyze_hardware_enhanced issues warnings info_items
     
     # 2. SPEICHER-ANALYSE
     echo -e "\n[DIAGNOSE] Speicher-Analyse (erweitert)"
-    timeout "${TIMEOUT_GENERAL}" analyze_memory_enhanced issues warnings info_items
+    analyze_memory_enhanced issues warnings info_items
     
     # 3. NETZWERK-GRUNDPRÜFUNG
     echo -e "\n[DIAGNOSE] Netzwerk-Analyse"
-    timeout "${TIMEOUT_NETWORK}" analyze_network_enhanced issues warnings info_items
+    analyze_network_enhanced issues warnings info_items
     
     # 4. DOCKER-SYSTEM
     if command -v docker >/dev/null 2>&1; then
         echo -e "\n[DIAGNOSE] Docker-System"
-        timeout "${TIMEOUT_DOCKER}" analyze_docker_enhanced issues warnings info_items
+        analyze_docker_enhanced issues warnings info_items
     fi
     
     # 5. GLOBALPING-PROBE
     echo -e "\n[DIAGNOSE] Globalping-Probe"
-    timeout "${TIMEOUT_GENERAL}" analyze_globalping_enhanced issues warnings info_items
+    analyze_globalping_enhanced issues warnings info_items
     
     # 6. AUTO-UPDATE-SYSTEM
     echo -e "\n[DIAGNOSE] Auto-Update-System"
-    timeout "${TIMEOUT_GENERAL}" analyze_autoupdate_enhanced issues warnings info_items
+    analyze_autoupdate_enhanced issues warnings info_items
     
     # 7. SICHERHEIT
     echo -e "\n[DIAGNOSE] Sicherheits-Konfiguration"
-    timeout "${TIMEOUT_GENERAL}" analyze_security_enhanced issues warnings info_items
+    analyze_security_enhanced issues warnings info_items
     
     # 8. PERFORMANCE
     echo -e "\n[DIAGNOSE] Performance-Analyse"
-    timeout "${TIMEOUT_GENERAL}" analyze_performance_enhanced issues warnings info_items
+    analyze_performance_enhanced issues warnings info_items
     
     # ERGEBNISSE
     echo -e "\n=== DIAGNOSE-ERGEBNISSE ==="
@@ -2418,7 +2418,7 @@ analyze_network_enhanced() {
     
     # Öffentliche IP ermitteln
     local public_ip
-    public_ip=$(timeout "${TIMEOUT_NETWORK}" curl -s https://api.ipify.org 2>/dev/null || echo "unbekannt")
+    public_ip=$(curl -s https://api.ipify.org 2>/dev/null || echo "unbekannt")
     echo "Öffentliche IP: ${public_ip}"
     info_ref+=("Öffentliche IP: ${public_ip}")
     
@@ -2707,17 +2707,17 @@ run_enhanced_network_diagnosis() {
     echo "===================================="
     
     # Basis-Netzwerk-Tests mit Timeouts
-    timeout "${TIMEOUT_NETWORK}" analyze_network_enhanced issues warnings info_items
+    analyze_network_enhanced issues warnings info_items
     
     # Erweiterte Tests
     echo -e "\n[NETZWERK] Latenz-Tests"
-    timeout "${TIMEOUT_NETWORK}" perform_latency_tests issues warnings info_items
+    perform_latency_tests issues warnings info_items
     
     echo -e "\n[NETZWERK] Bandwidth-Schätzung"
-    timeout "${TIMEOUT_NETWORK}" perform_bandwidth_test issues warnings info_items
+    perform_bandwidth_test issues warnings info_items
     
     echo -e "\n[NETZWERK] IPv6-Tests"
-    timeout "${TIMEOUT_NETWORK}" test_ipv6_connectivity issues warnings info_items
+    test_ipv6_connectivity issues warnings info_items
     
     # Ergebnisse anzeigen
     echo -e "\n=== NETZWERK-DIAGNOSE ERGEBNISSE ==="
@@ -2893,14 +2893,14 @@ install_docker_debian_ubuntu() {
     enhanced_log "INFO" "Installiere Docker für ${distro}"
     
     # Entferne alte Docker-Versionen
-    timeout "${TIMEOUT_PACKAGE}" apt-get remove -y docker docker-engine docker.io containerd runc >/dev/null 2>&1 || true
+    apt-get remove -y docker docker-engine docker.io containerd runc >/dev/null 2>&1 || true
     
     # Installiere Abhängigkeiten
-    timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+    apt-get update >/dev/null 2>&1 || {
         enhanced_log "WARN" "apt-get update fehlgeschlagen"
     }
     
-    timeout "${TIMEOUT_PACKAGE}" apt-get install -y \
+    apt-get install -y \
         apt-transport-https \
         ca-certificates \
         curl \
@@ -2914,7 +2914,7 @@ install_docker_debian_ubuntu() {
     local keyring_dir="/etc/apt/keyrings"
     mkdir -p "${keyring_dir}"
     
-    if ! timeout "${TIMEOUT_NETWORK}" curl -fsSL "https://download.docker.com/linux/${distro}/gpg" | \
+    if ! curl -fsSL "https://download.docker.com/linux/${distro}/gpg" | \
          gpg --dearmor -o "${keyring_dir}/docker.gpg" 2>/dev/null; then
         enhanced_log "ERROR" "Konnte Docker GPG-Schlüssel nicht hinzufügen"
         return 1
@@ -2932,12 +2932,12 @@ install_docker_debian_ubuntu() {
         tee /etc/apt/sources.list.d/docker.list >/dev/null
     
     # Docker installieren
-    timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+    apt-get update >/dev/null 2>&1 || {
         enhanced_log "ERROR" "Konnte Docker-Repository nicht aktualisieren"
         return 1
     }
     
-    timeout "${TIMEOUT_PACKAGE}" apt-get install -y \
+    apt-get install -y \
         docker-ce \
         docker-ce-cli \
         containerd.io \
@@ -2958,11 +2958,11 @@ install_docker_rhel_family() {
     
     # Entferne alte Docker-Versionen
     if command -v dnf >/dev/null 2>&1; then
-        timeout "${TIMEOUT_PACKAGE}" dnf remove -y docker docker-client docker-client-latest docker-common \
+        dnf remove -y docker docker-client docker-client-latest docker-common \
                      docker-latest docker-latest-logrotate docker-logrotate \
                      docker-engine podman runc >/dev/null 2>&1 || true
         
-        timeout "${TIMEOUT_PACKAGE}" dnf install -y dnf-plugins-core >/dev/null 2>&1 || {
+        dnf install -y dnf-plugins-core >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Konnte DNF-Plugins nicht installieren"
             return 1
         }
@@ -2973,23 +2973,23 @@ install_docker_rhel_family() {
             repo_distro="centos"
         fi
         
-        timeout "${TIMEOUT_NETWORK}" dnf config-manager --add-repo \
+        dnf config-manager --add-repo \
             "https://download.docker.com/linux/${repo_distro}/docker-ce.repo" >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Konnte Docker-Repository nicht hinzufügen"
             return 1
         }
         
-        timeout "${TIMEOUT_PACKAGE}" dnf install -y docker-ce docker-ce-cli containerd.io \
+        dnf install -y docker-ce docker-ce-cli containerd.io \
                       docker-buildx-plugin docker-compose-plugin >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
             return 1
         }
     elif command -v yum >/dev/null 2>&1; then
-        timeout "${TIMEOUT_PACKAGE}" yum remove -y docker docker-client docker-client-latest docker-common \
+        yum remove -y docker docker-client docker-client-latest docker-common \
                      docker-latest docker-latest-logrotate docker-logrotate \
                      docker-engine >/dev/null 2>&1 || true
         
-        timeout "${TIMEOUT_PACKAGE}" yum install -y yum-utils >/dev/null 2>&1 || {
+        yum install -y yum-utils >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Konnte YUM-Utils nicht installieren"
             return 1
         }
@@ -2999,13 +2999,13 @@ install_docker_rhel_family() {
             repo_distro="centos"
         fi
         
-        timeout "${TIMEOUT_NETWORK}" yum-config-manager --add-repo \
+        yum-config-manager --add-repo \
             "https://download.docker.com/linux/${repo_distro}/docker-ce.repo" >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Konnte Docker-Repository nicht hinzufügen"
             return 1
         }
         
-        timeout "${TIMEOUT_PACKAGE}" yum install -y docker-ce docker-ce-cli containerd.io \
+        yum install -y docker-ce docker-ce-cli containerd.io \
                       docker-buildx-plugin docker-compose-plugin >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
             return 1
@@ -3025,7 +3025,7 @@ install_docker_universal() {
     # Download und Ausführung des offiziellen Convenience-Skripts
     local install_script="${TMP_DIR}/get-docker.sh"
     
-    if ! timeout "${TIMEOUT_NETWORK}" curl -fsSL https://get.docker.com -o "${install_script}"; then
+    if ! curl -fsSL https://get.docker.com -o "${install_script}"; then
         enhanced_log "ERROR" "Konnte Docker-Installationsskript nicht herunterladen"
         return 1
     fi
@@ -3039,7 +3039,7 @@ install_docker_universal() {
     chmod +x "${install_script}"
     
     # Ausführung mit Timeout
-    if ! timeout "${TIMEOUT_PACKAGE}" "${install_script}" >/dev/null 2>&1; then
+    if ! "${install_script}" >/dev/null 2>&1; then
         enhanced_log "ERROR" "Docker-Installationsskript fehlgeschlagen"
         return 1
     fi
@@ -3084,7 +3084,7 @@ verify_docker_installation() {
     fi
     
     # Teste Docker-Funktionalität
-    if ! timeout "${TIMEOUT_DOCKER}" docker version >/dev/null 2>&1; then
+    if ! docker version >/dev/null 2>&1; then
         enhanced_log "ERROR" "Docker ist nicht funktionsfähig"
         return 1
     fi
@@ -3113,7 +3113,7 @@ install_docker_compose() {
     
     # Ermittle neueste Version
     local compose_version
-    compose_version=$(timeout "${TIMEOUT_NETWORK}" curl -s "https://api.github.com/repos/docker/compose/releases/latest" | \
+    compose_version=$(curl -s "https://api.github.com/repos/docker/compose/releases/latest" | \
                      grep '"tag_name":' | cut -d'"' -f4 2>/dev/null || echo "")
     
     if [[ -z "${compose_version}" ]]; then
@@ -3143,7 +3143,7 @@ install_docker_compose() {
     local compose_url="https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-${os}-${arch}"
     local compose_path="/usr/local/bin/docker-compose"
     
-    if ! timeout "${TIMEOUT_NETWORK}" curl -L "${compose_url}" -o "${compose_path}"; then
+    if ! curl -L "${compose_url}" -o "${compose_path}"; then
         enhanced_log "ERROR" "Konnte Docker Compose nicht herunterladen"
         return 1
     fi
@@ -3181,7 +3181,7 @@ check_internet() {
     
     # Erst ICMP-Pings versuchen
     for target in "${targets[@]}"; do
-        if timeout "${TIMEOUT_NETWORK}" ping -c 1 -W 3 "${target}" >/dev/null 2>&1; then
+        if ping -c 1 -W 3 "${target}" >/dev/null 2>&1; then
             connected=true
             enhanced_log "INFO" "Internetverbindung via ICMP zu ${target} erfolgreich"
             break
@@ -3191,7 +3191,7 @@ check_internet() {
     # Wenn Ping fehlschlägt, versuche HTTP-Anfragen
     if [[ "${connected}" == "false" ]]; then
         for target in "${http_targets[@]}"; do
-            if timeout "${TIMEOUT_NETWORK}" curl -s --connect-timeout 5 --max-time 10 "${target}" >/dev/null 2>&1; then
+            if curl -s --connect-timeout 5 --max-time 10 "${target}" >/dev/null 2>&1; then
                 connected=true
                 enhanced_log "INFO" "Internetverbindung via HTTP zu ${target} erfolgreich"
                 break
@@ -3249,7 +3249,7 @@ create_temp_dir() {
     return 0
 }
 
-# Erweiterte Hauptfunktion
+# Erweiterte Hauptfunktion (KORRIGIERT)
 enhanced_main() {
     local start_time
     start_time=$(date +%s)
@@ -3275,15 +3275,16 @@ enhanced_main() {
     
     install_sudo || enhanced_log "WARN" "sudo-Installation fehlgeschlagen"
     
-    if ! timeout "${TIMEOUT_GENERAL}" install_dependencies; then
+    # KORRIGIERT: Entferne timeout-Aufrufe
+    if ! install_dependencies; then
         enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
     fi
     
-    if ! timeout "${TIMEOUT_PACKAGE}" update_system; then
+    if ! update_system; then
         enhanced_log "WARN" "Systemaktualisierung fehlgeschlagen"
     fi
     
-    # PHASE 3: Swap-Konfiguration (früh, da wichtig für Performance)
+    # PHASE 3: Swap-Konfiguration
     enhanced_log "INFO" "Phase 3: Intelligente Swap-Konfiguration"
     if ! configure_smart_swap; then
         enhanced_log "WARN" "Swap-Konfiguration fehlgeschlagen"
@@ -3292,7 +3293,7 @@ enhanced_main() {
     # PHASE 4: Systemkonfiguration
     enhanced_log "INFO" "Phase 4: Systemkonfiguration"
     
-    if ! timeout "${TIMEOUT_NETWORK}" configure_hostname; then
+    if ! configure_hostname; then
         enhanced_log "WARN" "Hostname-Konfiguration fehlgeschlagen"
     fi
     
@@ -3302,29 +3303,29 @@ enhanced_main() {
         fi
     fi
     
-    # PHASE 5: Ubuntu Pro (falls anwendbar)
+    # PHASE 5: Ubuntu Pro
     enhanced_log "INFO" "Phase 5: Ubuntu Pro Aktivierung"
     if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
-        if ! timeout "${TIMEOUT_GENERAL}" ubuntu_pro_attach; then
+        if ! ubuntu_pro_attach; then
             enhanced_log "WARN" "Ubuntu Pro Aktivierung fehlgeschlagen"
         fi
     fi
     
-    # PHASE 6: Docker-Installation und -Konfiguration
+    # PHASE 6: Docker-Installation
     enhanced_log "INFO" "Phase 6: Docker-System"
     
     if [[ -n "${ADOPTION_TOKEN}" ]] || ! command -v docker >/dev/null 2>&1; then
-        if ! timeout "${TIMEOUT_DOCKER}" install_docker; then
+        if ! install_docker; then
             enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
             enhanced_notify "error" "Docker-Installation" "Docker konnte nicht installiert werden. Globalping-Probe nicht verfügbar."
         else
-            if ! timeout "${TIMEOUT_DOCKER}" install_docker_compose; then
+            if ! install_docker_compose; then
                 enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
             fi
         fi
     fi
     
-    # PHASE 7: Globalping-Probe (erweitert)
+    # PHASE 7: Globalping-Probe
     enhanced_log "INFO" "Phase 7: Erweiterte Globalping-Probe"
     if [[ -n "${ADOPTION_TOKEN}" ]]; then
         if ! install_enhanced_globalping_probe; then
@@ -3335,13 +3336,13 @@ enhanced_main() {
         enhanced_log "INFO" "Kein Adoption-Token - überspringe Globalping-Probe"
     fi
     
-    # PHASE 8: Erweiterte Auto-Update-Konfiguration
+    # PHASE 8: Auto-Update-Konfiguration
     enhanced_log "INFO" "Phase 8: Erweiterte Auto-Update-Konfiguration"
     if ! setup_enhanced_auto_update; then
         enhanced_log "WARN" "Auto-Update-Einrichtung fehlgeschlagen"
     fi
     
-    # PHASE 9: Kritische Updates und Reboot-Check
+    # PHASE 9: Kritische Updates
     enhanced_log "INFO" "Phase 9: Kritische Updates und Reboot-Check"
     if [[ "${NO_REBOOT:-}" != "true" ]]; then
         if ! check_critical_updates; then
@@ -3358,7 +3359,7 @@ enhanced_main() {
         enhanced_log "INFO" "Reboot-Check übersprungen (--no-reboot)"
     fi
     
-    # PHASE 10: Erweiterte Systemoptimierung
+    # PHASE 10: Systemoptimierung
     enhanced_log "INFO" "Phase 10: Erweiterte Systemoptimierung"
     if ! perform_enhanced_system_cleanup; then
         enhanced_log "WARN" "Systemreinigung fehlgeschlagen"
@@ -3370,7 +3371,7 @@ enhanced_main() {
         enhanced_log "WARN" "Abschlussdiagnose ergab Probleme"
     fi
     
-    # PHASE 12: Zusammenfassung und Benachrichtigung
+    # PHASE 12: Zusammenfassung
     enhanced_log "INFO" "Phase 12: Abschluss und Zusammenfassung"
     create_enhanced_summary
     
