@@ -3091,6 +3091,97 @@ get_fail2ban_status() {
         echo "Nicht installiert"
     fi
 }
+
+get_os_info() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
+        source /etc/os-release
+        echo "${PRETTY_NAME:-${NAME} ${VERSION_ID}}"
+    else
+        echo "Unbekannt"
+    fi
+}
+
+get_component_status() {
+    local component="$1"
+    if command -v "${component}" >/dev/null 2>&1; then
+        local version
+        case "${component}" in
+            sudo) version=$(sudo --version 2>/dev/null | head -1 | awk '{print $3}' || echo "") ;;
+            docker) version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "") ;;
+            *) version="" ;;
+        esac
+        echo "Installiert${version:+ (${version})}"
+    else
+        echo "Nicht installiert"
+    fi
+}
+
+get_docker_compose_status() {
+    if docker compose version >/dev/null 2>&1; then
+        local version
+        version=$(docker compose version 2>/dev/null | awk '{print $4}' || echo "")
+        echo "Plugin installiert${version:+ (${version})}"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        local version
+        version=$(docker-compose --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "")
+        echo "Standalone installiert${version:+ (${version})}"
+    else
+        echo "Nicht installiert"
+    fi
+}
+
+get_service_status() {
+    local services=("$@")
+    for service in "${services[@]}"; do
+        if systemctl is-active "${service}" >/dev/null 2>&1; then
+            echo "Aktiv"
+            return 0
+        fi
+    done
+    echo "Inaktiv"
+}
+
+get_firewall_status() {
+    if command -v ufw >/dev/null 2>&1; then
+        local status
+        status=$(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "unknown")
+        echo "UFW: ${status}"
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        if firewall-cmd --state >/dev/null 2>&1; then
+            echo "firewalld: aktiv"
+        else
+            echo "firewalld: inaktiv"
+        fi
+    else
+        echo "Nicht erkannt"
+    fi
+}
+
+get_ssh_root_status() {
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        if grep -q "^PermitRootLogin.*no" /etc/ssh/sshd_config 2>/dev/null; then
+            echo "Deaktiviert"
+        elif grep -q "^PermitRootLogin.*yes" /etc/ssh/sshd_config 2>/dev/null; then
+            echo "Aktiviert"
+        else
+            echo "Standard (meist aktiviert)"
+        fi
+    else
+        echo "SSH nicht konfiguriert"
+    fi
+}
+
+get_auto_security_updates_status() {
+    if [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]] && grep -q "1" /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+        echo "APT: Aktiviert"
+    elif command -v dnf >/dev/null 2>&1 && systemctl is-enabled dnf-automatic.timer >/dev/null 2>&1; then
+        echo "DNF: Aktiviert"
+    else
+        echo "Nicht konfiguriert"
+    fi
+}
+
 # Erweiterte Initialisierung
 initialize_enhanced_script() {
     # Sichere Umgebung
@@ -3309,6 +3400,430 @@ load_environment_variables() {
     fi
 }
 
+# Docker Installation (falls fehlend)
+install_docker() {
+    enhanced_log "INFO" "Installiere Docker"
+    
+    # Prüfe, ob Docker bereits installiert und funktionsfähig ist
+    if command -v docker >/dev/null 2>&1; then
+        if docker --version >/dev/null 2>&1 && systemctl is-active docker >/dev/null 2>&1; then
+            enhanced_log "INFO" "Docker ist bereits installiert und aktiv"
+            return 0
+        else
+            enhanced_log "INFO" "Docker ist installiert, aber nicht funktionsfähig - repariere Installation"
+        fi
+    fi
+    
+    # Erkenne Distribution sicher
+    local distro_id=""
+    local distro_version=""
+    
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck source=/dev/null
+        source /etc/os-release
+        distro_id="${ID,,}" # Kleinbuchstaben
+        distro_version="${VERSION_ID}"
+    else
+        enhanced_log "ERROR" "Kann Distribution nicht ermitteln"
+        return 1
+    fi
+    
+    enhanced_log "INFO" "Erkannte Distribution: ${distro_id} ${distro_version}"
+    
+    # Installiere je nach Distribution
+    case "${distro_id}" in
+        ubuntu|debian)
+            install_docker_debian_ubuntu "${distro_id}"
+            ;;
+        rhel|centos|rocky|almalinux|fedora)
+            install_docker_rhel_family "${distro_id}"
+            ;;
+        *)
+            enhanced_log "INFO" "Unbekannte Distribution, versuche universelle Installation"
+            install_docker_universal
+            ;;
+    esac
+    
+    # Verifiziere Installation
+    if ! verify_docker_installation; then
+        enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+        return 1
+    fi
+    
+    enhanced_log "INFO" "Docker erfolgreich installiert und konfiguriert"
+    return 0
+}
+
+# Docker für Debian/Ubuntu
+install_docker_debian_ubuntu() {
+    local distro="$1"
+    
+    enhanced_log "INFO" "Installiere Docker für ${distro}"
+    
+    # Entferne alte Docker-Versionen
+    timeout "${TIMEOUT_PACKAGE}" apt-get remove -y docker docker-engine docker.io containerd runc >/dev/null 2>&1 || true
+    
+    # Installiere Abhängigkeiten
+    timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+        enhanced_log "WARN" "apt-get update fehlgeschlagen"
+    }
+    
+    timeout "${TIMEOUT_PACKAGE}" apt-get install -y \
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release >/dev/null 2>&1 || {
+        enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
+        return 1
+    }
+    
+    # Docker GPG-Schlüssel hinzufügen
+    local keyring_dir="/etc/apt/keyrings"
+    mkdir -p "${keyring_dir}"
+    
+    if ! timeout "${TIMEOUT_NETWORK}" curl -fsSL "https://download.docker.com/linux/${distro}/gpg" | \
+         gpg --dearmor -o "${keyring_dir}/docker.gpg" 2>/dev/null; then
+        enhanced_log "ERROR" "Konnte Docker GPG-Schlüssel nicht hinzufügen"
+        return 1
+    fi
+    
+    chmod a+r "${keyring_dir}/docker.gpg"
+    
+    # Docker-Repository hinzufügen
+    local arch
+    arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+    local codename
+    codename=$(lsb_release -cs 2>/dev/null || echo "stable")
+    
+    echo "deb [arch=${arch} signed-by=${keyring_dir}/docker.gpg] https://download.docker.com/linux/${distro} ${codename} stable" | \
+        tee /etc/apt/sources.list.d/docker.list >/dev/null
+    
+    # Docker installieren
+    timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || {
+        enhanced_log "ERROR" "Konnte Docker-Repository nicht aktualisieren"
+        return 1
+    }
+    
+    timeout "${TIMEOUT_PACKAGE}" apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin >/dev/null 2>&1 || {
+        enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+        return 1
+    }
+    
+    return 0
+}
+
+# Docker für RHEL-Familie
+install_docker_rhel_family() {
+    local distro="$1"
+    
+    enhanced_log "INFO" "Installiere Docker für ${distro}"
+    
+    # Entferne alte Docker-Versionen
+    if command -v dnf >/dev/null 2>&1; then
+        timeout "${TIMEOUT_PACKAGE}" dnf remove -y docker docker-client docker-client-latest docker-common \
+                     docker-latest docker-latest-logrotate docker-logrotate \
+                     docker-engine podman runc >/dev/null 2>&1 || true
+        
+        timeout "${TIMEOUT_PACKAGE}" dnf install -y dnf-plugins-core >/dev/null 2>&1 || {
+            enhanced_log "ERROR" "Konnte DNF-Plugins nicht installieren"
+            return 1
+        }
+        
+        # Repository hinzufügen (Rocky/Alma verwenden CentOS-Repos)
+        local repo_distro="${distro}"
+        if [[ "${distro}" == "rocky" || "${distro}" == "almalinux" ]]; then
+            repo_distro="centos"
+        fi
+        
+        timeout "${TIMEOUT_NETWORK}" dnf config-manager --add-repo \
+            "https://download.docker.com/linux/${repo_distro}/docker-ce.repo" >/dev/null 2>&1 || {
+            enhanced_log "ERROR" "Konnte Docker-Repository nicht hinzufügen"
+            return 1
+        }
+        
+        timeout "${TIMEOUT_PACKAGE}" dnf install -y docker-ce docker-ce-cli containerd.io \
+                      docker-buildx-plugin docker-compose-plugin >/dev/null 2>&1 || {
+            enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+            return 1
+        }
+    elif command -v yum >/dev/null 2>&1; then
+        timeout "${TIMEOUT_PACKAGE}" yum remove -y docker docker-client docker-client-latest docker-common \
+                     docker-latest docker-latest-logrotate docker-logrotate \
+                     docker-engine >/dev/null 2>&1 || true
+        
+        timeout "${TIMEOUT_PACKAGE}" yum install -y yum-utils >/dev/null 2>&1 || {
+            enhanced_log "ERROR" "Konnte YUM-Utils nicht installieren"
+            return 1
+        }
+        
+        local repo_distro="${distro}"
+        if [[ "${distro}" == "rocky" || "${distro}" == "almalinux" ]]; then
+            repo_distro="centos"
+        fi
+        
+        timeout "${TIMEOUT_NETWORK}" yum-config-manager --add-repo \
+            "https://download.docker.com/linux/${repo_distro}/docker-ce.repo" >/dev/null 2>&1 || {
+            enhanced_log "ERROR" "Konnte Docker-Repository nicht hinzufügen"
+            return 1
+        }
+        
+        timeout "${TIMEOUT_PACKAGE}" yum install -y docker-ce docker-ce-cli containerd.io \
+                      docker-buildx-plugin docker-compose-plugin >/dev/null 2>&1 || {
+            enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+            return 1
+        }
+    else
+        enhanced_log "ERROR" "Kein unterstützter Paketmanager gefunden"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Universelle Docker-Installation (Fallback)
+install_docker_universal() {
+    enhanced_log "INFO" "Versuche universelle Docker-Installation"
+    
+    # Download und Ausführung des offiziellen Convenience-Skripts
+    local install_script="${TMP_DIR}/get-docker.sh"
+    
+    if ! timeout "${TIMEOUT_NETWORK}" curl -fsSL https://get.docker.com -o "${install_script}"; then
+        enhanced_log "ERROR" "Konnte Docker-Installationsskript nicht herunterladen"
+        return 1
+    fi
+    
+    # Skript-Validierung
+    if ! grep -q "#!/bin/sh" "${install_script}"; then
+        enhanced_log "ERROR" "Docker-Installationsskript ist ungültig"
+        return 1
+    fi
+    
+    chmod +x "${install_script}"
+    
+    # Ausführung mit Timeout
+    if ! timeout "${TIMEOUT_PACKAGE}" "${install_script}" >/dev/null 2>&1; then
+        enhanced_log "ERROR" "Docker-Installationsskript fehlgeschlagen"
+        return 1
+    fi
+    
+    rm -f "${install_script}"
+    return 0
+}
+
+# Docker-Installation verifizieren
+verify_docker_installation() {
+    enhanced_log "INFO" "Verifiziere Docker-Installation"
+    
+    # Prüfe, ob Docker-Befehl verfügbar ist
+    if ! command -v docker >/dev/null 2>&1; then
+        enhanced_log "ERROR" "Docker-Befehl nicht verfügbar"
+        return 1
+    fi
+    
+    # Starte und aktiviere Docker-Dienst
+    if ! systemctl enable docker >/dev/null 2>&1; then
+        enhanced_log "WARN" "Konnte Docker-Dienst nicht aktivieren"
+    fi
+    
+    if ! systemctl start docker >/dev/null 2>&1; then
+        enhanced_log "ERROR" "Konnte Docker-Dienst nicht starten"
+        return 1
+    fi
+    
+    # Warte auf Docker-Initialisierung
+    local wait_count=0
+    while [[ ${wait_count} -lt 30 ]]; do
+        if systemctl is-active docker >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+        ((wait_count++))
+    done
+    
+    if ! systemctl is-active docker >/dev/null 2>&1; then
+        enhanced_log "ERROR" "Docker-Dienst ist nicht aktiv"
+        return 1
+    fi
+    
+    # Teste Docker-Funktionalität
+    if ! timeout "${TIMEOUT_DOCKER}" docker version >/dev/null 2>&1; then
+        enhanced_log "ERROR" "Docker ist nicht funktionsfähig"
+        return 1
+    fi
+    
+    enhanced_log "INFO" "Docker-Installation erfolgreich verifiziert"
+    return 0
+}
+
+# Docker Compose installieren (falls nicht über Plugin verfügbar)
+install_docker_compose() {
+    enhanced_log "INFO" "Prüfe Docker Compose Installation"
+    
+    # Prüfe Plugin-Version zuerst
+    if docker compose version >/dev/null 2>&1; then
+        enhanced_log "INFO" "Docker Compose Plugin ist bereits verfügbar"
+        return 0
+    fi
+    
+    # Prüfe eigenständige Version
+    if command -v docker-compose >/dev/null 2>&1; then
+        enhanced_log "INFO" "Docker Compose (eigenständig) ist bereits installiert"
+        return 0
+    fi
+    
+    enhanced_log "INFO" "Installiere Docker Compose"
+    
+    # Ermittle neueste Version
+    local compose_version
+    compose_version=$(timeout "${TIMEOUT_NETWORK}" curl -s "https://api.github.com/repos/docker/compose/releases/latest" | \
+                     grep '"tag_name":' | cut -d'"' -f4 2>/dev/null || echo "")
+    
+    if [[ -z "${compose_version}" ]]; then
+        compose_version="v2.21.0"  # Fallback-Version
+        enhanced_log "INFO" "Verwende Fallback-Version: ${compose_version}"
+    else
+        enhanced_log "INFO" "Neueste Version gefunden: ${compose_version}"
+    fi
+    
+    # Ermittle Architektur
+    local arch
+    arch=$(uname -m)
+    case "${arch}" in
+        x86_64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        armv7l) arch="armv7" ;;
+        *) 
+            enhanced_log "ERROR" "Nicht unterstützte Architektur: ${arch}"
+            return 1
+            ;;
+    esac
+    
+    local os
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    
+    # Download Docker Compose
+    local compose_url="https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-${os}-${arch}"
+    local compose_path="/usr/local/bin/docker-compose"
+    
+    if ! timeout "${TIMEOUT_NETWORK}" curl -L "${compose_url}" -o "${compose_path}"; then
+        enhanced_log "ERROR" "Konnte Docker Compose nicht herunterladen"
+        return 1
+    fi
+    
+    chmod +x "${compose_path}"
+    
+    # Verifiziere Installation
+    if ! "${compose_path}" --version >/dev/null 2>&1; then
+        enhanced_log "ERROR" "Docker Compose ist nicht funktionsfähig"
+        rm -f "${compose_path}"
+        return 1
+    fi
+    
+    enhanced_log "INFO" "Docker Compose erfolgreich installiert"
+    return 0
+}
+
+# Check-Funktionen
+check_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        enhanced_log "ERROR" "Dieses Skript benötigt root-Rechte!"
+        return 1
+    fi
+    enhanced_log "INFO" "Root-Check erfolgreich"
+    return 0
+}
+
+check_internet() {
+    enhanced_log "INFO" "Prüfe Internetverbindung..."
+    
+    # Mehrere Ziele testen mit Timeout
+    local targets=("1.1.1.1" "8.8.8.8" "9.9.9.9")
+    local http_targets=("https://www.google.com" "https://www.cloudflare.com" "https://httpbin.org/ip")
+    local connected=false
+    
+    # Erst ICMP-Pings versuchen
+    for target in "${targets[@]}"; do
+        if timeout "${TIMEOUT_NETWORK}" ping -c 1 -W 3 "${target}" >/dev/null 2>&1; then
+            connected=true
+            enhanced_log "INFO" "Internetverbindung via ICMP zu ${target} erfolgreich"
+            break
+        fi
+    done
+    
+    # Wenn Ping fehlschlägt, versuche HTTP-Anfragen
+    if [[ "${connected}" == "false" ]]; then
+        for target in "${http_targets[@]}"; do
+            if timeout "${TIMEOUT_NETWORK}" curl -s --connect-timeout 5 --max-time 10 "${target}" >/dev/null 2>&1; then
+                connected=true
+                enhanced_log "INFO" "Internetverbindung via HTTP zu ${target} erfolgreich"
+                break
+            fi
+        done
+    fi
+    
+    if [[ "${connected}" == "false" ]]; then
+        enhanced_log "ERROR" "Keine Internetverbindung verfügbar"
+        enhanced_notify "error" "Netzwerk-Problem" "Keine Internetverbindung verfügbar"
+        return 1
+    fi
+    
+    enhanced_log "INFO" "Internetverbindung erfolgreich verifiziert"
+    return 0
+}
+
+check_systemd_available() {
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]] && systemctl --version >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+check_crontab_available() {
+    if command -v crontab >/dev/null 2>&1; then
+        # Prüfe, ob crontab schreibbar ist
+        if crontab -l >/dev/null 2>&1 || [[ $? -eq 1 ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+check_anacron_available() {
+    if [[ -d /etc/cron.weekly ]] && [[ -w /etc/cron.weekly ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Sicheres temporäres Verzeichnis
+create_temp_dir() {
+    # Entferne altes temporäres Verzeichnis falls vorhanden
+    [[ -d "${TMP_DIR}" ]] && rm -rf "${TMP_DIR}"
+    
+    mkdir -p "${TMP_DIR}" || {
+        enhanced_log "WARN" "Konnte temporäres Verzeichnis nicht erstellen, verwende /tmp"
+        TMP_DIR="/tmp/globalping_install_$$"
+        mkdir -p "${TMP_DIR}" || {
+            enhanced_log "ERROR" "Konnte kein temporäres Verzeichnis erstellen"
+            return 1
+        }
+    }
+    
+    chmod 700 "${TMP_DIR}"
+    enhanced_log "INFO" "Temporäres Verzeichnis angelegt: ${TMP_DIR}"
+    
+    # Cleanup-Trap für temporäres Verzeichnis
+    trap 'rm -rf "${TMP_DIR}" 2>/dev/null || true' EXIT
+    
+    return 0
+}
+
 # ===========================================
 # SCRIPT EXECUTION START (ENHANCED)
 # ===========================================
@@ -3330,3 +3845,10 @@ fi
 # ===========================================
 # END OF ENHANCED SCRIPT
 # ===========================================
+
+# Erweiterte Version-Info
+# Version: 2025.06.07-enhanced
+# Features: Erweiterte Automatisierung, intelligente Swap-Konfiguration,
+#           robuste Fehlerbehandlung, erweiterte Telegram-Benachrichtigungen,
+#           CPU-Hang-Schutz, automatische Reboots, absolute Speicherplatz-Schwellwerte
+# Kompatibilität: Ubuntu 18.04+, Debian 9+, RHEL/CentOS 7+, Rocky/Alma 8+, Fedora 30+
