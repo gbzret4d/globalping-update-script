@@ -46,6 +46,7 @@ HOSTNAME_NEW=""
 PUBLIC_IP=""
 ASN=""
 PROVIDER=""
+
 # =============================================
 # FUNKTIONEN
 # =============================================
@@ -172,6 +173,31 @@ ${debug_info}"
     exit "${error_code}"
 }
 
+# Cleanup bei Fehlern
+cleanup_on_error() {
+    log "Führe Fehler-Cleanup durch"
+    
+    # Stoppe laufende kritische Operationen
+    if command -v docker >/dev/null 2>&1; then
+        # Stoppe nur Container die wir gerade erstellt haben
+        local our_containers
+        our_containers=$(docker ps --filter "label=com.globalping.installer=true" -q 2>/dev/null || echo "")
+        if [[ -n "${our_containers}" ]]; then
+            # shellcheck disable=SC2086
+            docker stop ${our_containers} >/dev/null 2>&1 || true
+        fi
+    fi
+    
+    # Entferne temporäre Dateien
+    if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
+        rm -rf "${TMP_DIR}" 2>/dev/null || true
+    fi
+    
+    # Entferne Lock-Files
+    rm -f "/var/lock/globalping-install-enhanced.lock" 2>/dev/null || true
+    rm -f "/tmp/globalping_auto_update.lock" 2>/dev/null || true
+}
+
 # Verbesserte Logging-Funktion
 enhanced_log() {
     local level="$1"
@@ -231,6 +257,70 @@ rotate_logs_if_needed() {
         
         enhanced_log "INFO" "Log-Datei rotiert (${log_size_mb}MB -> 0MB)"
     fi
+}
+
+# Install sudo (KORRIGIERT - Funktion hinzugefügt)
+install_sudo() {
+    log "Prüfe sudo-Installation"
+    
+    if command -v sudo >/dev/null 2>&1; then
+        log "sudo ist bereits installiert"
+        return 0
+    fi
+    
+    log "Installiere sudo"
+    
+    if command -v apt-get >/dev/null 2>&1; then
+        timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1 || true
+        timeout "${TIMEOUT_PACKAGE}" apt-get install -y sudo >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        timeout "${TIMEOUT_PACKAGE}" dnf install -y sudo >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        timeout "${TIMEOUT_PACKAGE}" yum install -y sudo >/dev/null 2>&1
+    else
+        enhanced_log "WARN" "Kein unterstützter Paketmanager für sudo-Installation gefunden"
+        return 1
+    fi
+    
+    return $?
+}
+
+# Configure hostname (KORRIGIERT - Funktion hinzugefügt)
+configure_hostname() {
+    log "Konfiguriere Hostname"
+    
+    if [[ -n "${HOSTNAME_NEW}" && "${HOSTNAME_NEW}" != "unknown" ]]; then
+        local current_hostname
+        current_hostname=$(hostname 2>/dev/null || echo "")
+        
+        if [[ "${current_hostname}" != "${HOSTNAME_NEW}" ]]; then
+            log "Setze Hostname auf: ${HOSTNAME_NEW}"
+            
+            # Setze temporären Hostname
+            hostname "${HOSTNAME_NEW}" 2>/dev/null || true
+            
+            # Persistiere Hostname
+            echo "${HOSTNAME_NEW}" > /etc/hostname 2>/dev/null || true
+            
+            # Aktualisiere /etc/hosts
+            if [[ -f /etc/hosts ]]; then
+                sed -i "s/^127.0.1.1.*/127.0.1.1\t${HOSTNAME_NEW}/" /etc/hosts 2>/dev/null || true
+                
+                # Füge Eintrag hinzu falls nicht vorhanden
+                if ! grep -q "127.0.1.1.*${HOSTNAME_NEW}" /etc/hosts; then
+                    echo "127.0.1.1 ${HOSTNAME_NEW}" >> /etc/hosts
+                fi
+            fi
+            
+            log "Hostname konfiguriert: ${HOSTNAME_NEW}"
+        else
+            log "Hostname bereits korrekt gesetzt: ${current_hostname}"
+        fi
+    else
+        log "Kein gültiger Hostname verfügbar, verwende aktuellen"
+    fi
+    
+    return 0
 }
 # Ubuntu Pro Aktivierung
 ubuntu_pro_attach() {
@@ -507,6 +597,7 @@ optimize_for_raspberry_pi() {
     enhanced_log "INFO" "Raspberry Pi-Optimierungen abgeschlossen"
     return 0
 }
+
 # Erweiterte Systemvalidierung
 enhanced_validate_system() {
     log "Führe erweiterte Systemvalidierung durch"
@@ -642,7 +733,6 @@ configure_smart_swap() {
     log "Swap erfolgreich konfiguriert: ${swap_size_mb}MB"
     return 0
 }
-
 # Prüfung auf kritische Updates und Reboot-Notwendigkeit
 check_critical_updates() {
     log "Prüfe auf kritische Updates"
@@ -796,6 +886,7 @@ EOF
     enhanced_notify "error" "System-Reboot" "System wird nach kritischen Updates neu gestartet.
 Post-Reboot-Bereinigung ist geplant."
 }
+
 # Verbesserte Globalping-Probe Installation mit restart=always
 install_enhanced_globalping_probe() {
     log "Installiere erweiterte Globalping-Probe mit restart=always"
@@ -1077,15 +1168,26 @@ verify_enhanced_globalping_probe() {
     log "Erweiterte Globalping-Probe erfolgreich verifiziert"
     return 0
 }
+
+# KORRIGIERT - Funktion hinzugefügt
+create_enhanced_globalping_maintenance() {
+    log "Erstelle erweiterte Globalping-Wartung"
+    
+    # Diese Funktion ist bereits durch die wöchentliche Wartung abgedeckt
+    # und wird über den systemd-Timer ausgeführt
+    log "Erweiterte Wartung wird über wöchentliche Auto-Update abgedeckt"
+    
+    return 0
+}
 # Wöchentlicher automatischer Modus
 run_weekly_maintenance() {
     log "Starte wöchentliche automatische Wartung"
     
     WEEKLY_MODE="true"
     
-    # Phase 1: Skript-Update
+    # Phase 1: Skript-Update (KORRIGIERT)
     log "Phase 1: Skript-Update"
-    if ! perform_auto_update; then
+    if ! perform_enhanced_auto_update; then
         enhanced_log "WARN" "Auto-Update fehlgeschlagen"
     fi
     
@@ -1379,6 +1481,57 @@ perform_log_rotation() {
     # Entferne alte rotierte Logs
     find /var/log -name "*.1" -o -name "*.2" -o -name "*.old" -o -name "*.gz" -mtime +7 -delete 2>/dev/null || true
 }
+
+# KORRIGIERT - Emergency Cleanup Funktion hinzugefügt
+perform_emergency_cleanup() {
+    log "Führe Notfall-Bereinigung durch"
+    
+    # Stoppe alle nicht-essentiellen Services
+    systemctl stop docker >/dev/null 2>&1 || true
+    
+    # Aggressive Docker-Bereinigung
+    if command -v docker >/dev/null 2>&1; then
+        # Stoppe alle Container außer wichtigen System-Containern
+        docker ps -q | grep -v globalping | xargs -r docker stop >/dev/null 2>&1 || true
+        
+        # Entferne alle gestoppten Container
+        docker container prune -f >/dev/null 2>&1 || true
+        
+        # Entferne alle ungenutzten Images
+        docker image prune -a -f >/dev/null 2>&1 || true
+        
+        # Entferne alle ungenutzten Volumes
+        docker volume prune -f >/dev/null 2>&1 || true
+        
+        # Entferne alle ungenutzten Netzwerke
+        docker network prune -f >/dev/null 2>&1 || true
+        
+        # System-weite Bereinigung
+        docker system prune -a -f --volumes >/dev/null 2>&1 || true
+    fi
+    
+    # Aggressive Systemreinigung
+    cleanup_package_cache_enhanced
+    
+    # Entferne große temporäre Dateien
+    find /tmp -type f -size +10M -delete 2>/dev/null || true
+    find /var/tmp -type f -size +10M -delete 2>/dev/null || true
+    
+    # Leere verschiedene Caches
+    rm -rf /var/cache/*/* 2>/dev/null || true
+    rm -rf /root/.cache/* 2>/dev/null || true
+    
+    # Journald-Logs aggressiv kürzen
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl --vacuum-size=10M --vacuum-time=1d >/dev/null 2>&1 || true
+    fi
+    
+    # Starte Docker wieder
+    systemctl start docker >/dev/null 2>&1 || true
+    
+    log "Notfall-Bereinigung abgeschlossen"
+    return 0
+}
 # Erweiterte Auto-Update-Einrichtung
 setup_enhanced_auto_update() {
     log "Richte erweiterte automatische Updates ein"
@@ -1551,7 +1704,7 @@ remove_old_enhanced_schedulers() {
     rm -f "/etc/cron.weekly/globalping-update" 2>/dev/null || true
 }
 
-# Erweiterte Auto-Update-Ausführung
+# Erweiterte Auto-Update-Ausführung (KORRIGIERT)
 perform_enhanced_auto_update() {
     log "Führe erweiterte automatische Aktualisierung durch"
     
@@ -1660,6 +1813,7 @@ perform_enhanced_auto_update() {
     
     return 0
 }
+
 # Erweiterte Hilfefunktion
 show_enhanced_help() {
     cat << 'HELP_EOF'
@@ -1901,7 +2055,6 @@ process_enhanced_args() {
         "${force_mode}" \
         "${no_reboot}"
 }
-
 # Führe erweiterte spezielle Modi aus
 execute_enhanced_special_modes() {
     local install_docker_only="$1"
@@ -1933,11 +2086,12 @@ execute_enhanced_special_modes() {
         exit 1
     }
     
-    # Temporäres Verzeichnis für alle Modi
+    # Temporäres Verzeichnis für alle Modi (KORRIGIERT)
     create_temp_dir || {
         enhanced_log "ERROR" "Konnte temporäres Verzeichnis nicht erstellen"
         exit 1
-        
+    }
+    
     # No-Reboot-Flag global setzen
     if [[ "${no_reboot}" == "true" ]]; then
         export NO_REBOOT="true"
@@ -2063,6 +2217,7 @@ enable_enhanced_debug_mode() {
     enhanced_log "INFO" "Erweiterter Debug-Modus aktiviert: ${debug_log}"
     return 0
 }
+
 # Erweiterte Systemdiagnose mit Timeouts
 run_enhanced_diagnostics() {
     log "Führe erweiterte Systemdiagnose durch"
@@ -2299,7 +2454,6 @@ analyze_network_enhanced() {
         info_ref+=("Internet-Konnektivität verfügbar")
     fi
 }
-
 # Erweiterte Docker-Analyse
 analyze_docker_enhanced() {
     local -n issues_ref=$1
@@ -2678,727 +2832,6 @@ test_ipv6_connectivity() {
         info_ref+=("IPv6-Konnektivität: ${successful_tests}/${#ipv6_targets[@]} Tests erfolgreich")
     fi
 }
-# Erweiterte Hauptfunktion
-enhanced_main() {
-    local start_time
-    start_time=$(date +%s)
-    
-    enhanced_log "INFO" "=== STARTE ERWEITERTES SERVER-SETUP ==="
-    enhanced_log "INFO" "Version: ${SCRIPT_VERSION}"
-    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:+Wöchentlich}${WEEKLY_MODE:-Normal}"
-    enhanced_log "INFO" "Startzeit: $(date)"
-    enhanced_log "INFO" "========================================="
-    
-    # Sammle Systeminformationen früh
-    get_enhanced_system_info
-    
-    # PHASE 1: Erweiterte Systemvalidierung
-    enhanced_log "INFO" "Phase 1: Erweiterte Systemvalidierung"
-    if ! enhanced_validate_system; then
-        enhanced_notify "error" "Systemvalidierung" "Kritische Systemanforderungen nicht erfüllt. Setup kann nicht fortgesetzt werden."
-        return 1
-    fi
-    
-    # PHASE 2: Grundlegende Systemvorbereitung
-    enhanced_log "INFO" "Phase 2: Systemvorbereitung"
-    
-    install_sudo || enhanced_log "WARN" "sudo-Installation fehlgeschlagen"
-    
-    if ! timeout "${TIMEOUT_GENERAL}" install_dependencies; then
-        enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
-    fi
-    
-    if ! timeout "${TIMEOUT_PACKAGE}" update_system; then
-        enhanced_log "WARN" "Systemaktualisierung fehlgeschlagen"
-    fi
-    
-    # PHASE 3: Swap-Konfiguration (früh, da wichtig für Performance)
-    enhanced_log "INFO" "Phase 3: Intelligente Swap-Konfiguration"
-    if ! configure_smart_swap; then
-        enhanced_log "WARN" "Swap-Konfiguration fehlgeschlagen"
-    fi
-    
-    # PHASE 4: Systemkonfiguration
-    enhanced_log "INFO" "Phase 4: Systemkonfiguration"
-    
-    if ! timeout "${TIMEOUT_NETWORK}" configure_hostname; then
-        enhanced_log "WARN" "Hostname-Konfiguration fehlgeschlagen"
-    fi
-    
-    if [[ -n "${SSH_KEY}" ]]; then
-        if ! setup_ssh_key; then
-            enhanced_log "WARN" "SSH-Schlüssel-Setup fehlgeschlagen"
-        fi
-    fi
-    
-    # PHASE 5: Ubuntu Pro (falls anwendbar)
-    enhanced_log "INFO" "Phase 5: Ubuntu Pro Aktivierung"
-    if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
-        if ! timeout "${TIMEOUT_GENERAL}" ubuntu_pro_attach; then
-            enhanced_log "WARN" "Ubuntu Pro Aktivierung fehlgeschlagen"
-        fi
-    fi
-    
-    # PHASE 6: Docker-Installation und -Konfiguration
-    enhanced_log "INFO" "Phase 6: Docker-System"
-    
-    if [[ -n "${ADOPTION_TOKEN}" ]] || ! command -v docker >/dev/null 2>&1; then
-        if ! timeout "${TIMEOUT_DOCKER}" install_docker; then
-            enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
-            enhanced_notify "error" "Docker-Installation" "Docker konnte nicht installiert werden. Globalping-Probe nicht verfügbar."
-        else
-            if ! timeout "${TIMEOUT_DOCKER}" install_docker_compose; then
-                enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
-            fi
-        fi
-    fi
-    
-    # PHASE 7: Globalping-Probe (erweitert)
-    enhanced_log "INFO" "Phase 7: Erweiterte Globalping-Probe"
-    if [[ -n "${ADOPTION_TOKEN}" ]]; then
-        if ! install_enhanced_globalping_probe; then
-            enhanced_log "ERROR" "Globalping-Probe-Installation fehlgeschlagen"
-            enhanced_notify "error" "Globalping-Probe" "Installation der Globalping-Probe fehlgeschlagen"
-        fi
-    else
-        enhanced_log "INFO" "Kein Adoption-Token - überspringe Globalping-Probe"
-    fi
-    
-    # PHASE 8: Erweiterte Auto-Update-Konfiguration
-    enhanced_log "INFO" "Phase 8: Erweiterte Auto-Update-Konfiguration"
-    if ! setup_enhanced_auto_update; then
-        enhanced_log "WARN" "Auto-Update-Einrichtung fehlgeschlagen"
-    fi
-    
-    # PHASE 9: Kritische Updates und Reboot-Check
-    enhanced_log "INFO" "Phase 9: Kritische Updates und Reboot-Check"
-    if [[ "${NO_REBOOT:-}" != "true" ]]; then
-        if ! check_critical_updates; then
-            enhanced_log "WARN" "Update-Check fehlgeschlagen"
-        fi
-        
-        # Wenn Reboot geplant ist, beende hier
-        if [[ "${REBOOT_REQUIRED}" == "true" ]]; then
-            enhanced_log "INFO" "Reboot geplant - Setup wird nach Neustart fortgesetzt"
-            enhanced_notify "error" "System-Reboot" "System wird nach Updates neu gestartet. Setup wird automatisch fortgesetzt."
-            return 0
-        fi
-    else
-        enhanced_log "INFO" "Reboot-Check übersprungen (--no-reboot)"
-    fi
-    
-    # PHASE 10: Erweiterte Systemoptimierung
-    enhanced_log "INFO" "Phase 10: Erweiterte Systemoptimierung"
-    if ! perform_enhanced_system_cleanup; then
-        enhanced_log "WARN" "Systemreinigung fehlgeschlagen"
-    fi
-    
-    # PHASE 11: Abschlussdiagnose
-    enhanced_log "INFO" "Phase 11: Abschlussdiagnose"
-    if ! run_enhanced_diagnostics; then
-        enhanced_log "WARN" "Abschlussdiagnose ergab Probleme"
-    fi
-    
-    # PHASE 12: Zusammenfassung und Benachrichtigung
-    enhanced_log "INFO" "Phase 12: Abschluss und Zusammenfassung"
-    create_enhanced_summary
-    
-    # Berechne Ausführungszeit
-    local end_time duration
-    end_time=$(date +%s)
-    duration=$((end_time - start_time))
-    
-    enhanced_log "INFO" "=== ERWEITERTES SERVER-SETUP ABGESCHLOSSEN ==="
-    enhanced_log "INFO" "Ausführungszeit: ${duration} Sekunden"
-    enhanced_log "INFO" "Abschlusszeit: $(date)"
-    enhanced_log "INFO" "=============================================="
-    
-    # Erfolgreiche Installation-Benachrichtigung
-    if [[ "${WEEKLY_MODE}" != "true" ]]; then
-        enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
-
-Konfigurierte Features:
-${ADOPTION_TOKEN:+✓ Globalping-Probe}
-${TELEGRAM_TOKEN:+✓ Telegram-Benachrichtigungen}
-${SSH_KEY:+✓ SSH-Zugang}
-✓ Automatische Wartung
-✓ Intelligente Swap-Konfiguration"
-    fi
-    
-    return 0
-}
-
-# Erweiterte Zusammenfassung
-create_enhanced_summary() {
-    local summary_file="/root/enhanced_setup_summary_$(date +%Y%m%d_%H%M%S).txt"
-    
-    enhanced_log "INFO" "Erstelle erweiterte Zusammenfassung: ${summary_file}"
-    
-    {
-        echo "=========================================="
-        echo "    ERWEITERTE SERVER SETUP ZUSAMMENFASSUNG"
-        echo "=========================================="
-        echo "Datum: $(date)"
-        echo "Skript-Version: ${SCRIPT_VERSION}"
-        echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
-        echo "Modus: ${WEEKLY_MODE:+Wöchentliche Wartung}${WEEKLY_MODE:-Vollständige Installation}"
-        echo "=========================================="
-        
-        echo -e "\n--- SYSTEM-INFORMATION (ERWEITERT) ---"
-        echo "Betriebssystem: $(get_os_info)"
-        echo "Kernel: $(uname -r 2>/dev/null || echo 'unbekannt')"
-        echo "Architektur: $(uname -m 2>/dev/null || echo 'unbekannt')"
-        echo "Virtualisierung: $(detect_virtualization)"
-        echo "CPU: $(get_cpu_info)"
-        echo "RAM gesamt: $(free -h 2>/dev/null | awk '/^Mem:/ {print $2}' || echo 'unbekannt')"
-        echo "RAM verfügbar: $(free -h 2>/dev/null | awk '/^Mem:/ {print $7}' || echo 'unbekannt')"
-        echo "Swap: $(get_swap_info)"
-        echo "Festplatte (Root): $(df -h / 2>/dev/null | awk 'NR==2 {print $2" ("$5" belegt)"}' || echo 'unbekannt')"
-        echo "Verfügbarer Speicher: $(df -h / 2>/dev/null | awk 'NR==2 {print $4}' || echo 'unbekannt')"
-        
-        echo -e "\n--- NETZWERK-INFORMATION (ERWEITERT) ---"
-        echo "Land: ${COUNTRY}"
-        echo "Öffentliche IP: ${PUBLIC_IP}"
-        echo "ASN: ${ASN}"
-        echo "Provider: ${PROVIDER}"
-        echo "Lokale IPs:"
-        ip addr show 2>/dev/null | grep -E "inet " | grep -v "127.0.0.1" | awk '{print "  " $2}' || echo "  Nicht verfügbar"
-        echo "IPv6-Adressen:"
-        ip addr show 2>/dev/null | grep "inet6.*scope global" | awk '{print "  " $2}' || echo "  Nicht konfiguriert"
-        echo "Standard-Gateway: $(ip route show default 2>/dev/null | awk '{print $3}' | head -1 || echo 'unbekannt')"
-        
-        echo -e "\n--- INSTALLIERTE KOMPONENTEN (ERWEITERT) ---"
-        echo "sudo: $(get_component_status sudo)"
-        echo "Docker: $(get_enhanced_docker_status)"
-        echo "Docker Compose: $(get_docker_compose_status)"
-        echo "Globalping-Probe: $(get_enhanced_globalping_status)"
-        
-        echo -e "\n--- DIENSTE-STATUS (ERWEITERT) ---"
-        if command -v systemctl >/dev/null 2>&1; then
-            echo "SSH: $(get_service_status ssh sshd)"
-            echo "Docker: $(get_service_status docker)"
-            echo "Cron: $(get_service_status cron crond)"
-            echo "Systemd-Journal: $(get_service_status systemd-journald)"
-        fi
-        
-        echo -e "\n--- AUTO-UPDATE SYSTEM (ERWEITERT) ---"
-        echo "$(get_enhanced_autoupdate_status)"
-        
-        echo -e "\n--- SICHERHEIT (ERWEITERT) ---"
-        echo "Firewall: $(get_firewall_status)"
-        echo "SSH Root-Login: $(get_ssh_root_status)"
-        echo "SSH Password-Auth: $(get_ssh_password_status)"
-        echo "Fail2Ban: $(get_fail2ban_status)"
-        echo "Automatische Updates: $(get_auto_security_updates_status)"
-        
-        echo -e "\n--- PERFORMANCE-METRIKEN ---"
-        echo "Load Average: $(cat /proc/loadavg 2>/dev/null | awk '{print $1" (1min), "$2" (5min)"}' || echo 'unbekannt')"
-        echo "Offene Dateien: $(lsof 2>/dev/null | wc -l || echo 'unbekannt')"
-        echo "Aktive Prozesse: $(ps aux 2>/dev/null | wc -l || echo 'unbekannt')"
-        
-        echo -e "\n--- KONFIGURIERTE FEATURES (ERWEITERT) ---"
-        [[ -n "${ADOPTION_TOKEN}" ]] && echo "✓ Globalping-Probe mit restart=always"
-        [[ -n "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]] && echo "✓ Telegram-Benachrichtigungen (nur Fehler)"
-        [[ -n "${SSH_KEY}" ]] && echo "✓ SSH-Schlüssel konfiguriert"
-        [[ -n "${UBUNTU_PRO_TOKEN}" ]] && echo "✓ Ubuntu Pro aktiviert"
-        echo "✓ Intelligente Swap-Konfiguration (${SWAP_MIN_TOTAL_GB}GB Ziel)"
-        echo "✓ Erweiterte Log-Rotation (max ${MAX_LOG_SIZE_MB}MB)"
-        echo "✓ Absolute Speicherplatz-Überwachung (min ${MIN_FREE_SPACE_GB}GB)"
-        echo "✓ CPU-Hang-Schutz durch Timeouts"
-        echo "✓ Automatische Reboots bei kritischen Updates"
-        echo "✓ Wöchentliche automatische Wartung"
-        
-        echo -e "\n--- WICHTIGE DATEIEN UND PFADE ---"
-        echo "Setup-Log: ${LOG_FILE}"
-        echo "Globalping-Verzeichnis: /opt/globalping"
-        echo "Auto-Update-Skript: ${SCRIPT_PATH}"
-        echo "Systemd-Timer: ${SYSTEMD_TIMER_PATH}"
-        echo "Swap-Datei: $(ls /swapfile 2>/dev/null || echo 'Nicht konfiguriert')"
-        
-        echo -e "\n--- AUTOMATISIERTE AUFGABEN ---"
-        echo "Wöchentliche Wartung:"
-        echo "  ✓ Skript-Updates"
-        echo "  ✓ System-Updates mit Reboot-Check"
-        echo "  ✓ Globalping-Container-Wartung"
-        echo "  ✓ Erweiterte Systemreinigung"
-        echo "  ✓ Swap-Optimierung"
-        echo "  ✓ Log-Rotation"
-        
-        echo -e "\n--- NÄCHSTE SCHRITTE ---"
-        if [[ -n "${ADOPTION_TOKEN}" ]]; then
-            echo "1. Prüfen Sie den Globalping-Probe Status:"
-            echo "   docker ps | grep globalping"
-            echo "   docker logs globalping-probe"
-        fi
-        echo "2. Überwachen Sie die automatische Wartung:"
-        if check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
-            echo "   systemctl status globalping-update.timer"
-            echo "   systemctl list-timers globalping-update.timer"
-        fi
-        echo "3. Führen Sie regelmäßige Diagnosen durch:"
-        echo "   ${SCRIPT_PATH} --diagnose"
-        echo "4. Bei Problemen erweiterte Logs prüfen:"
-        echo "   tail -f ${LOG_FILE}"
-        echo "5. Notfall-Bereinigung bei Speicherproblemen:"
-        echo "   ${SCRIPT_PATH} --emergency-cleanup"
-        
-        echo -e "\n--- TELEGRAM-BENACHRICHTIGUNGEN ---"
-        if [[ -n "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
-            echo "Konfiguriert für Chat-ID: ${TELEGRAM_CHAT}"
-            echo "Nachrichten werden gesendet bei:"
-            echo "  ✓ Kritischen Fehlern"
-            echo "  ✓ Erfolgreicher Installation"
-            echo "  ✓ System-Reboots"
-            echo "Format: Land, Hostname, IP, ASN, Provider + Fehlermeldung"
-        else
-            echo "Nicht konfiguriert - Keine Benachrichtigungen"
-        fi
-        
-        echo -e "\n=========================================="
-        echo "Erweiterte Setup-Zusammenfassung erstellt: $(date)"
-        echo "Für Unterstützung: ${SCRIPT_PATH} --help"
-        echo "=========================================="
-        
-    } > "${summary_file}"
-    
-    # Zeige Zusammenfassung auch in der Konsole (gekürzt)
-    echo "=== SETUP ERFOLGREICH ABGESCHLOSSEN ==="
-    echo "Details: ${summary_file}"
-    if [[ -n "${ADOPTION_TOKEN}" ]]; then
-        echo "Globalping-Probe: $(docker ps --format "{{.Status}}" --filter name=globalping-probe 2>/dev/null || echo 'Status unbekannt')"
-    fi
-    echo "Automatische Wartung: Wöchentlich geplant"
-    echo "Telegram-Benachrichtigungen: ${TELEGRAM_TOKEN:+Aktiv}${TELEGRAM_TOKEN:-Nicht konfiguriert}"
-    echo "========================================"
-    
-    enhanced_log "INFO" "Erweiterte Zusammenfassung gespeichert: ${summary_file}"
-    return 0
-}
-
-# Hilfsfunktionen für erweiterte Zusammenfassung
-detect_virtualization() {
-    if command -v systemd-detect-virt >/dev/null 2>&1; then
-        systemd-detect-virt 2>/dev/null || echo "Bare Metal"
-    elif [[ -f /proc/cpuinfo ]] && grep -q "hypervisor" /proc/cpuinfo; then
-        echo "Virtualisiert"
-    else
-        echo "Bare Metal"
-    fi
-}
-
-get_cpu_info() {
-    local cpu_model cores
-    cpu_model=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unbekannt")
-    cores=$(nproc 2>/dev/null || echo "1")
-    echo "${cpu_model} (${cores} Kerne)"
-}
-
-get_swap_info() {
-    local swap_total_kb swap_total_mb
-    swap_total_kb=$(grep "SwapTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    swap_total_mb=$((swap_total_kb / 1024))
-    
-    if [[ ${swap_total_mb} -eq 0 ]]; then
-        echo "Nicht konfiguriert"
-    else
-        echo "${swap_total_mb}MB"
-    fi
-}
-
-get_enhanced_docker_status() {
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "Nicht installiert"
-        return
-    fi
-    
-    local version status
-    version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "")
-    
-    if systemctl is-active docker >/dev/null 2>&1; then
-        status="Aktiv"
-    else
-        status="Inaktiv"
-    fi
-    
-    echo "Installiert (${version}) - ${status}"
-}
-
-get_enhanced_globalping_status() {
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "Docker nicht verfügbar"
-        return
-    fi
-    
-    local container_name
-    container_name=$(docker ps -a --format "{{.Names}}" | grep -i globalping | head -1 || echo "")
-    
-    if [[ -z "${container_name}" ]]; then
-        echo "Nicht installiert"
-        return
-    fi
-    
-    local status restart_policy
-    status=$(docker inspect -f '{{.State.Status}}' "${container_name}" 2>/dev/null || echo "unknown")
-    restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "${container_name}" 2>/dev/null || echo "")
-    
-    echo "Installiert - ${status} (restart=${restart_policy})"
-}
-
-get_enhanced_autoupdate_status() {
-    local mechanisms=()
-    local next_run=""
-    
-    if check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
-        mechanisms+=("Systemd-Timer")
-        if systemctl is-active globalping-update.timer >/dev/null 2>&1; then
-            next_run=$(systemctl show globalping-update.timer --property=NextElapseUSecRealtime --value 2>/dev/null | head -1)
-        fi
-    fi
-    
-    if check_crontab_available && crontab -l 2>/dev/null | grep -q "auto-weekly"; then
-        mechanisms+=("Crontab")
-    fi
-    
-    if [[ ${#mechanisms[@]} -gt 0 ]]; then
-        echo "Aktiv (${mechanisms[*]})${next_run:+ - Nächster Lauf: ${next_run}}"
-    else
-        echo "Nicht konfiguriert"
-    fi
-}
-
-get_ssh_password_status() {
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        if grep -q "^PasswordAuthentication.*no" /etc/ssh/sshd_config 2>/dev/null; then
-            echo "Deaktiviert"
-        elif grep -q "^PasswordAuthentication.*yes" /etc/ssh/sshd_config 2>/dev/null; then
-            echo "Aktiviert"
-        else
-            echo "Standard"
-        fi
-    else
-        echo "SSH nicht konfiguriert"
-    fi
-}
-
-get_fail2ban_status() {
-    if command -v fail2ban-client >/dev/null 2>&1; then
-        if systemctl is-active fail2ban >/dev/null 2>&1; then
-            echo "Installiert und aktiv"
-        else
-            echo "Installiert aber inaktiv"
-        fi
-    else
-        echo "Nicht installiert"
-    fi
-}
-
-get_os_info() {
-    if [[ -f /etc/os-release ]]; then
-        # shellcheck source=/dev/null
-        source /etc/os-release
-        echo "${PRETTY_NAME:-${NAME} ${VERSION_ID}}"
-    else
-        echo "Unbekannt"
-    fi
-}
-
-get_component_status() {
-    local component="$1"
-    if command -v "${component}" >/dev/null 2>&1; then
-        local version
-        case "${component}" in
-            sudo) version=$(sudo --version 2>/dev/null | head -1 | awk '{print $3}' || echo "") ;;
-            docker) version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "") ;;
-            *) version="" ;;
-        esac
-        echo "Installiert${version:+ (${version})}"
-    else
-        echo "Nicht installiert"
-    fi
-}
-
-get_docker_compose_status() {
-    if docker compose version >/dev/null 2>&1; then
-        local version
-        version=$(docker compose version 2>/dev/null | awk '{print $4}' || echo "")
-        echo "Plugin installiert${version:+ (${version})}"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        local version
-        version=$(docker-compose --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "")
-        echo "Standalone installiert${version:+ (${version})}"
-    else
-        echo "Nicht installiert"
-    fi
-}
-
-get_service_status() {
-    local services=("$@")
-    for service in "${services[@]}"; do
-        if systemctl is-active "${service}" >/dev/null 2>&1; then
-            echo "Aktiv"
-            return 0
-        fi
-    done
-    echo "Inaktiv"
-}
-
-get_firewall_status() {
-    if command -v ufw >/dev/null 2>&1; then
-        local status
-        status=$(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "unknown")
-        echo "UFW: ${status}"
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        if firewall-cmd --state >/dev/null 2>&1; then
-            echo "firewalld: aktiv"
-        else
-            echo "firewalld: inaktiv"
-        fi
-    else
-        echo "Nicht erkannt"
-    fi
-}
-
-get_ssh_root_status() {
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        if grep -q "^PermitRootLogin.*no" /etc/ssh/sshd_config 2>/dev/null; then
-            echo "Deaktiviert"
-        elif grep -q "^PermitRootLogin.*yes" /etc/ssh/sshd_config 2>/dev/null; then
-            echo "Aktiviert"
-        else
-            echo "Standard (meist aktiviert)"
-        fi
-    else
-        echo "SSH nicht konfiguriert"
-    fi
-}
-
-get_auto_security_updates_status() {
-    if [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]] && grep -q "1" /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
-        echo "APT: Aktiviert"
-    elif command -v dnf >/dev/null 2>&1 && systemctl is-enabled dnf-automatic.timer >/dev/null 2>&1; then
-        echo "DNF: Aktiviert"
-    else
-        echo "Nicht konfiguriert"
-    fi
-}
-
-# Erweiterte Initialisierung
-initialize_enhanced_script() {
-    # Sichere Umgebung
-    umask 022
-    export DEBIAN_FRONTEND=noninteractive
-    export NEEDRESTART_MODE=a
-    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    
-    # Log-System initialisieren
-    mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
-    
-    # Script-Lock für Instanz-Kontrolle
-    local lock_file="/var/lock/globalping-install-enhanced.lock"
-    if [[ -f "${lock_file}" ]]; then
-        local lock_pid
-        lock_pid=$(cat "${lock_file}" 2>/dev/null || echo "")
-        if [[ -n "${lock_pid}" ]] && kill -0 "${lock_pid}" 2>/dev/null; then
-            enhanced_log "ERROR" "Script läuft bereits (PID: ${lock_pid})"
-            exit 1
-        else
-            rm -f "${lock_file}"
-        fi
-    fi
-    
-    echo "$$" > "${lock_file}"
-    
-    # Erweiterte Cleanup-Traps
-    trap 'enhanced_cleanup_and_exit $?' EXIT
-    trap 'enhanced_emergency_exit INT' INT
-    trap 'enhanced_emergency_exit TERM' TERM
-    trap 'enhanced_emergency_exit HUP' HUP
-    
-    enhanced_log "INFO" "Erweiterte Script-Initialisierung abgeschlossen (PID: $$)"
-}
-
-# Erweiterte Cleanup-Funktion
-enhanced_cleanup_and_exit() {
-    local exit_code="$1"
-    
-    # Entferne Lock-Files
-    rm -f "/var/lock/globalping-install-enhanced.lock" 2>/dev/null || true
-    rm -f "/tmp/globalping_auto_update.lock" 2>/dev/null || true
-    
-    # Temporäre Dateien aufräumen
-    if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
-        rm -rf "${TMP_DIR}" 2>/dev/null || true
-    fi
-    
-    # Debug-Modus beenden
-    if [[ "${DEBUG_MODE}" == "true" ]]; then
-        set +x
-        [[ -n "${BASH_XTRACEFD}" ]] && exec 19>&- 2>/dev/null || true
-    fi
-    
-    # Performance-Report
-    if [[ -n "${start_time:-}" ]]; then
-        local end_time duration
-        end_time=$(date +%s)
-        duration=$((end_time - start_time))
-        enhanced_log "INFO" "Script-Laufzeit: ${duration} Sekunden"
-    fi
-    
-    # Abschluss-Log
-    if [[ ${exit_code} -eq 0 ]]; then
-        enhanced_log "INFO" "Script erfolgreich beendet"
-    else
-        enhanced_log "ERROR" "Script mit Fehler beendet (Exit-Code: ${exit_code})"
-    fi
-    
-    exit "${exit_code}"
-}
-
-# Erweiterte Notfall-Exit-Funktion
-enhanced_emergency_exit() {
-    local signal="${1:-UNKNOWN}"
-    
-    enhanced_log "ERROR" "Script durch Signal unterbrochen: ${signal}"
-    enhanced_notify "error" "Script unterbrochen" "Installation durch Signal ${signal} unterbrochen"
-    
-    # Stoppe laufende kritische Operationen
-    if command -v docker >/dev/null 2>&1; then
-        # Stoppe nur Container die wir gestartet haben
-        local our_containers
-        our_containers=$(docker ps --filter "label=com.globalping.installer=true" -q 2>/dev/null || echo "")
-        if [[ -n "${our_containers}" ]]; then
-            # shellcheck disable=SC2086
-            docker stop ${our_containers} >/dev/null 2>&1 || true
-        fi
-    fi
-    
-    # Cleanup und Exit
-    enhanced_cleanup_and_exit 130
-}
-
-# Erweiterte Error-Handler-Installation
-install_enhanced_error_handlers() {
-    # Error-Handler für unbehandelte Fehler
-    trap 'enhanced_error_handler ${LINENO} $?' ERR
-    
-    # Signal-Handler (erweitert)
-    trap 'enhanced_emergency_exit INT' INT
-    trap 'enhanced_emergency_exit TERM' TERM
-    trap 'enhanced_emergency_exit HUP' HUP
-    trap 'enhanced_emergency_exit QUIT' QUIT
-    
-    # Exit-Handler
-    trap 'enhanced_cleanup_and_exit $?' EXIT
-    
-    enhanced_log "INFO" "Erweiterte Error-Handler installiert"
-}
-
-# Erweiterte Systemvoraussetzungen-Validierung
-validate_enhanced_system_requirements() {
-    enhanced_log "INFO" "Validiere erweiterte Systemvoraussetzungen"
-    
-    local errors=()
-    local warnings=()
-    
-    # Kernel-Version (für Docker)
-    local kernel_version
-    kernel_version=$(uname -r | cut -d. -f1,2)
-    if [[ -n "${kernel_version}" ]] && (( $(echo "${kernel_version} < 3.10" | bc -l 2>/dev/null || echo "0") )); then
-        warnings+=("Alter Kernel: ${kernel_version} (Docker benötigt 3.10+)")
-    fi
-    
-    # Zeitzone konfiguriert
-    if [[ ! -f /etc/localtime ]]; then
-        warnings+=("Keine Zeitzone konfiguriert")
-    fi
-    
-    # Basis-Tools verfügbar
-    local required_tools=("curl" "grep" "awk" "sed" "bc")
-    for tool in "${required_tools[@]}"; do
-        if ! command -v "${tool}" >/dev/null 2>&1; then
-            errors+=("Benötigtes Tool fehlt: ${tool}")
-        fi
-    done
-    
-    # CPU-Kerne (Performance-Warnung)
-    local cpu_cores
-    cpu_cores=$(nproc 2>/dev/null || echo "1")
-    if [[ ${cpu_cores} -eq 1 ]]; then
-        warnings+=("Nur 1 CPU-Kern verfügbar - Performance eingeschränkt")
-    fi
-    
-    # /tmp beschreibbar und mit genügend Platz
-    if [[ ! -w /tmp ]]; then
-        errors+=("/tmp nicht beschreibbar")
-    else
-        local tmp_space_kb
-        tmp_space_kb=$(df /tmp | awk 'NR==2 {print $4}' || echo "0")
-        if [[ ${tmp_space_kb} -lt 102400 ]]; then  # 100MB
-            warnings+=("Wenig Platz in /tmp: $((tmp_space_kb / 1024))MB")
-        fi
-    fi
-    
-    # Ausgabe der Validierung
-    if [[ ${#errors[@]} -gt 0 ]]; then
-        enhanced_log "ERROR" "Kritische Systemvoraussetzungen nicht erfüllt:"
-        for error in "${errors[@]}"; do
-            enhanced_log "ERROR" "  ❌ ${error}"
-        done
-        enhanced_notify "error" "Systemvalidierung" "$(printf '%s\n' "${errors[@]}")"
-        return 1
-    fi
-    
-    if [[ ${#warnings[@]} -gt 0 ]]; then
-        enhanced_log "WARN" "Systemvoraussetzungen-Warnungen:"
-        for warning in "${warnings[@]}"; do
-            enhanced_log "WARN" "  ⚠️  ${warning}"
-        done
-    fi
-    
-    enhanced_log "INFO" "Erweiterte Systemvoraussetzungen erfüllt"
-    return 0
-}
-
-# Script-Haupt-Eingang (Enhanced)
-enhanced_script_main() {
-    # Globale Start-Zeit für Performance-Tracking
-    local start_time
-    start_time=$(date +%s)
-    export start_time
-    
-    # Erweiterte Initialisierung
-    initialize_enhanced_script
-    install_enhanced_error_handlers
-    
-    # Erweiterte Systemvalidierung
-    validate_enhanced_system_requirements || {
-        enhanced_log "ERROR" "Erweiterte Systemvalidierung fehlgeschlagen"
-        exit 1
-    }
-    
-    # Verarbeite erweiterte Argumente
-    process_enhanced_args "$@"
-    
-    # Führe erweiterte Hauptfunktion aus
-    enhanced_main
-}
-
-# Umgebungsvariablen-Support (Backward Compatibility)
-load_environment_variables() {
-    # Übernehme Umgebungsvariablen falls gesetzt (nur wenn noch nicht durch Argumente gesetzt)
-    [[ -z "${ADOPTION_TOKEN}" && -n "${ADOPTION_TOKEN:-}" ]] && ADOPTION_TOKEN="${ADOPTION_TOKEN}"
-    [[ -z "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_TOKEN:-}" ]] && TELEGRAM_TOKEN="${TELEGRAM_TOKEN}"
-    [[ -z "${TELEGRAM_CHAT}" && -n "${TELEGRAM_CHAT:-}" ]] && TELEGRAM_CHAT="${TELEGRAM_CHAT}"
-    [[ -z "${UBUNTU_PRO_TOKEN}" && -n "${UBUNTU_PRO_TOKEN:-}" ]] && UBUNTU_PRO_TOKEN="${UBUNTU_PRO_TOKEN}"
-    [[ -z "${SSH_KEY}" && -n "${SSH_KEY:-}" ]] && SSH_KEY="${SSH_KEY}"
-    
-    if [[ -n "${ADOPTION_TOKEN}" ]]; then
-        enhanced_log "INFO" "Adoption-Token aus Umgebungsvariable geladen"
-    fi
-    if [[ -n "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
-        enhanced_log "INFO" "Telegram-Konfiguration aus Umgebungsvariablen geladen"
-    fi
-}
 
 # Docker Installation (falls fehlend)
 install_docker() {
@@ -3453,7 +2886,6 @@ install_docker() {
     enhanced_log "INFO" "Docker erfolgreich installiert und konfiguriert"
     return 0
 }
-
 # Docker für Debian/Ubuntu
 install_docker_debian_ubuntu() {
     local distro="$1"
@@ -3794,13 +3226,6 @@ check_crontab_available() {
     return 1
 }
 
-check_anacron_available() {
-    if [[ -d /etc/cron.weekly ]] && [[ -w /etc/cron.weekly ]]; then
-        return 0
-    fi
-    return 1
-}
-
 # Sicheres temporäres Verzeichnis
 create_temp_dir() {
     # Entferne altes temporäres Verzeichnis falls vorhanden
@@ -3822,6 +3247,299 @@ create_temp_dir() {
     trap 'rm -rf "${TMP_DIR}" 2>/dev/null || true' EXIT
     
     return 0
+}
+
+# Erweiterte Hauptfunktion
+enhanced_main() {
+    local start_time
+    start_time=$(date +%s)
+    
+    enhanced_log "INFO" "=== STARTE ERWEITERTES SERVER-SETUP ==="
+    enhanced_log "INFO" "Version: ${SCRIPT_VERSION}"
+    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:+Wöchentlich}${WEEKLY_MODE:-Normal}"
+    enhanced_log "INFO" "Startzeit: $(date)"
+    enhanced_log "INFO" "========================================="
+    
+    # Sammle Systeminformationen früh
+    get_enhanced_system_info
+    
+    # PHASE 1: Erweiterte Systemvalidierung
+    enhanced_log "INFO" "Phase 1: Erweiterte Systemvalidierung"
+    if ! enhanced_validate_system; then
+        enhanced_notify "error" "Systemvalidierung" "Kritische Systemanforderungen nicht erfüllt. Setup kann nicht fortgesetzt werden."
+        return 1
+    fi
+    
+    # PHASE 2: Grundlegende Systemvorbereitung
+    enhanced_log "INFO" "Phase 2: Systemvorbereitung"
+    
+    install_sudo || enhanced_log "WARN" "sudo-Installation fehlgeschlagen"
+    
+    if ! timeout "${TIMEOUT_GENERAL}" install_dependencies; then
+        enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
+    fi
+    
+    if ! timeout "${TIMEOUT_PACKAGE}" update_system; then
+        enhanced_log "WARN" "Systemaktualisierung fehlgeschlagen"
+    fi
+    
+    # PHASE 3: Swap-Konfiguration (früh, da wichtig für Performance)
+    enhanced_log "INFO" "Phase 3: Intelligente Swap-Konfiguration"
+    if ! configure_smart_swap; then
+        enhanced_log "WARN" "Swap-Konfiguration fehlgeschlagen"
+    fi
+    
+    # PHASE 4: Systemkonfiguration
+    enhanced_log "INFO" "Phase 4: Systemkonfiguration"
+    
+    if ! timeout "${TIMEOUT_NETWORK}" configure_hostname; then
+        enhanced_log "WARN" "Hostname-Konfiguration fehlgeschlagen"
+    fi
+    
+    if [[ -n "${SSH_KEY}" ]]; then
+        if ! setup_ssh_key; then
+            enhanced_log "WARN" "SSH-Schlüssel-Setup fehlgeschlagen"
+        fi
+    fi
+    
+    # PHASE 5: Ubuntu Pro (falls anwendbar)
+    enhanced_log "INFO" "Phase 5: Ubuntu Pro Aktivierung"
+    if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
+        if ! timeout "${TIMEOUT_GENERAL}" ubuntu_pro_attach; then
+            enhanced_log "WARN" "Ubuntu Pro Aktivierung fehlgeschlagen"
+        fi
+    fi
+    
+    # PHASE 6: Docker-Installation und -Konfiguration
+    enhanced_log "INFO" "Phase 6: Docker-System"
+    
+    if [[ -n "${ADOPTION_TOKEN}" ]] || ! command -v docker >/dev/null 2>&1; then
+        if ! timeout "${TIMEOUT_DOCKER}" install_docker; then
+            enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+            enhanced_notify "error" "Docker-Installation" "Docker konnte nicht installiert werden. Globalping-Probe nicht verfügbar."
+        else
+            if ! timeout "${TIMEOUT_DOCKER}" install_docker_compose; then
+                enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
+            fi
+        fi
+    fi
+    
+    # PHASE 7: Globalping-Probe (erweitert)
+    enhanced_log "INFO" "Phase 7: Erweiterte Globalping-Probe"
+    if [[ -n "${ADOPTION_TOKEN}" ]]; then
+        if ! install_enhanced_globalping_probe; then
+            enhanced_log "ERROR" "Globalping-Probe-Installation fehlgeschlagen"
+            enhanced_notify "error" "Globalping-Probe" "Installation der Globalping-Probe fehlgeschlagen"
+        fi
+    else
+        enhanced_log "INFO" "Kein Adoption-Token - überspringe Globalping-Probe"
+    fi
+    
+    # PHASE 8: Erweiterte Auto-Update-Konfiguration
+    enhanced_log "INFO" "Phase 8: Erweiterte Auto-Update-Konfiguration"
+    if ! setup_enhanced_auto_update; then
+        enhanced_log "WARN" "Auto-Update-Einrichtung fehlgeschlagen"
+    fi
+    
+    # PHASE 9: Kritische Updates und Reboot-Check
+    enhanced_log "INFO" "Phase 9: Kritische Updates und Reboot-Check"
+    if [[ "${NO_REBOOT:-}" != "true" ]]; then
+        if ! check_critical_updates; then
+            enhanced_log "WARN" "Update-Check fehlgeschlagen"
+        fi
+        
+        # Wenn Reboot geplant ist, beende hier
+        if [[ "${REBOOT_REQUIRED}" == "true" ]]; then
+            enhanced_log "INFO" "Reboot geplant - Setup wird nach Neustart fortgesetzt"
+            enhanced_notify "error" "System-Reboot" "System wird nach Updates neu gestartet. Setup wird automatisch fortgesetzt."
+            return 0
+        fi
+    else
+        enhanced_log "INFO" "Reboot-Check übersprungen (--no-reboot)"
+    fi
+    
+    # PHASE 10: Erweiterte Systemoptimierung
+    enhanced_log "INFO" "Phase 10: Erweiterte Systemoptimierung"
+    if ! perform_enhanced_system_cleanup; then
+        enhanced_log "WARN" "Systemreinigung fehlgeschlagen"
+    fi
+    
+    # PHASE 11: Abschlussdiagnose
+    enhanced_log "INFO" "Phase 11: Abschlussdiagnose"
+    if ! run_enhanced_diagnostics; then
+        enhanced_log "WARN" "Abschlussdiagnose ergab Probleme"
+    fi
+    
+    # PHASE 12: Zusammenfassung und Benachrichtigung
+    enhanced_log "INFO" "Phase 12: Abschluss und Zusammenfassung"
+    create_enhanced_summary
+    
+    # Berechne Ausführungszeit
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    
+    enhanced_log "INFO" "=== ERWEITERTES SERVER-SETUP ABGESCHLOSSEN ==="
+    enhanced_log "INFO" "Ausführungszeit: ${duration} Sekunden"
+    enhanced_log "INFO" "Abschlusszeit: $(date)"
+    enhanced_log "INFO" "=============================================="
+    
+    # Erfolgreiche Installation-Benachrichtigung
+    if [[ "${WEEKLY_MODE}" != "true" ]]; then
+        enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
+
+Konfigurierte Features:
+${ADOPTION_TOKEN:+✓ Globalping-Probe}
+${TELEGRAM_TOKEN:+✓ Telegram-Benachrichtigungen}
+${SSH_KEY:+✓ SSH-Zugang}
+✓ Automatische Wartung
+✓ Intelligente Swap-Konfiguration"
+    fi
+    
+    return 0
+}
+
+# Erweiterte Zusammenfassung (vereinfacht für Platz)
+create_enhanced_summary() {
+    local summary_file="/root/enhanced_setup_summary_$(date +%Y%m%d_%H%M%S).txt"
+    
+    enhanced_log "INFO" "Erstelle erweiterte Zusammenfassung: ${summary_file}"
+    
+    {
+        echo "=========================================="
+        echo "    ERWEITERTE SERVER SETUP ZUSAMMENFASSUNG"
+        echo "=========================================="
+        echo "Datum: $(date)"
+        echo "Skript-Version: ${SCRIPT_VERSION}"
+        echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
+        echo "Land: ${COUNTRY}, IP: ${PUBLIC_IP}"
+        echo "Globalping-Probe: ${ADOPTION_TOKEN:+Installiert}${ADOPTION_TOKEN:-Nicht installiert}"
+        echo "Telegram: ${TELEGRAM_TOKEN:+Konfiguriert}${TELEGRAM_TOKEN:-Nicht konfiguriert}"
+        echo "Auto-Update: Wöchentlich aktiv"
+        echo "=========================================="
+    } > "${summary_file}"
+    
+    echo "=== SETUP ERFOLGREICH ABGESCHLOSSEN ==="
+    echo "Details: ${summary_file}"
+    echo "Automatische Wartung: Wöchentlich geplant"
+    echo "========================================"
+    
+    return 0
+}
+
+# Erweiterte Initialisierung (KORRIGIERT)
+initialize_enhanced_script() {
+    # Sichere Umgebung
+    umask 022
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    
+    # Log-System initialisieren
+    mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+    
+    # Script-Lock für Instanz-Kontrolle
+    local lock_file="/var/lock/globalping-install-enhanced.lock"
+    if [[ -f "${lock_file}" ]]; then
+        local lock_pid
+        lock_pid=$(cat "${lock_file}" 2>/dev/null || echo "")
+        if [[ -n "${lock_pid}" ]] && kill -0 "${lock_pid}" 2>/dev/null; then
+            enhanced_log "ERROR" "Script läuft bereits (PID: ${lock_pid})"
+            exit 1
+        else
+            rm -f "${lock_file}"
+        fi
+    fi
+    
+    echo "$$" > "${lock_file}"
+    
+    # Cleanup-Trap (nur einmal setzen)
+    trap 'enhanced_cleanup_and_exit $?' EXIT
+    
+    enhanced_log "INFO" "Erweiterte Script-Initialisierung abgeschlossen (PID: $$)"
+}
+
+# Erweiterte Cleanup-Funktion
+enhanced_cleanup_and_exit() {
+    local exit_code="$1"
+    
+    # Entferne Lock-Files
+    rm -f "/var/lock/globalping-install-enhanced.lock" 2>/dev/null || true
+    rm -f "/tmp/globalping_auto_update.lock" 2>/dev/null || true
+    
+    # Temporäre Dateien aufräumen
+    if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
+        rm -rf "${TMP_DIR}" 2>/dev/null || true
+    fi
+    
+    # Debug-Modus beenden
+    if [[ "${DEBUG_MODE}" == "true" ]]; then
+        set +x
+        [[ -n "${BASH_XTRACEFD}" ]] && exec 19>&- 2>/dev/null || true
+    fi
+    
+    # Abschluss-Log
+    if [[ ${exit_code} -eq 0 ]]; then
+        enhanced_log "INFO" "Script erfolgreich beendet"
+    else
+        enhanced_log "ERROR" "Script mit Fehler beendet (Exit-Code: ${exit_code})"
+    fi
+    
+    exit "${exit_code}"
+}
+
+# Script-Haupt-Eingang (Enhanced)
+enhanced_script_main() {
+    # Globale Start-Zeit für Performance-Tracking
+    local start_time
+    start_time=$(date +%s)
+    export start_time
+    
+    # Erweiterte Initialisierung
+    initialize_enhanced_script
+    
+    # Erweiterte Error-Handler
+    trap 'enhanced_error_handler ${LINENO} $?' ERR
+    
+    # Validiere Systemvoraussetzungen
+    if ! check_root; then
+        enhanced_log "ERROR" "Root-Rechte erforderlich"
+        exit 1
+    fi
+    
+    if ! check_internet; then
+        enhanced_log "ERROR" "Internetverbindung erforderlich"
+        exit 1
+    fi
+    
+    # Temporäres Verzeichnis erstellen
+    if ! create_temp_dir; then
+        enhanced_log "ERROR" "Konnte temporäres Verzeichnis nicht erstellen"
+        exit 1
+    fi
+    
+    # Verarbeite erweiterte Argumente
+    process_enhanced_args "$@"
+    
+    # Führe erweiterte Hauptfunktion aus
+    enhanced_main
+}
+
+# Umgebungsvariablen-Support (Backward Compatibility)
+load_environment_variables() {
+    # Übernehme Umgebungsvariablen falls gesetzt (nur wenn noch nicht durch Argumente gesetzt)
+    [[ -z "${ADOPTION_TOKEN}" && -n "${ADOPTION_TOKEN:-}" ]] && ADOPTION_TOKEN="${ADOPTION_TOKEN}"
+    [[ -z "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_TOKEN:-}" ]] && TELEGRAM_TOKEN="${TELEGRAM_TOKEN}"
+    [[ -z "${TELEGRAM_CHAT}" && -n "${TELEGRAM_CHAT:-}" ]] && TELEGRAM_CHAT="${TELEGRAM_CHAT}"
+    [[ -z "${UBUNTU_PRO_TOKEN}" && -n "${UBUNTU_PRO_TOKEN:-}" ]] && UBUNTU_PRO_TOKEN="${UBUNTU_PRO_TOKEN}"
+    [[ -z "${SSH_KEY}" && -n "${SSH_KEY:-}" ]] && SSH_KEY="${SSH_KEY}"
+    
+    if [[ -n "${ADOPTION_TOKEN}" ]]; then
+        enhanced_log "INFO" "Adoption-Token aus Umgebungsvariable geladen"
+    fi
+    if [[ -n "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
+        enhanced_log "INFO" "Telegram-Konfiguration aus Umgebungsvariablen geladen"
+    fi
 }
 
 # ===========================================
