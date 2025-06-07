@@ -14,7 +14,7 @@ readonly CRON_JOB="0 0 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 0 * * 0 /usr/local/bin/install_globalping.sh --auto-update"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2023.10.22"
+readonly SCRIPT_VERSION="2025.06.07"
 
 # Initialisiere Variablen
 UBUNTU_PRO_TOKEN=""
