@@ -1937,8 +1937,7 @@ execute_enhanced_special_modes() {
     create_temp_dir || {
         enhanced_log "ERROR" "Konnte temporäres Verzeichnis nicht erstellen"
         exit 1
-    fi
-    
+        
     # No-Reboot-Flag global setzen
     if [[ "${no_reboot}" == "true" ]]; then
         export NO_REBOOT="true"
