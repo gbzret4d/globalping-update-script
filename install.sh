@@ -13,6 +13,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/gbzret4d/globalping-update-script/
 SCRIPT_PATH="/usr/local/bin/install_globalping.sh"
 CRON_JOB="0 0 * * 0 /usr/local/bin/globalping-maintenance"
 AUTO_UPDATE_CRON="0 0 * * 0 /usr/local/bin/install_globalping.sh --auto-update"
+SCRIPT_VERSION="2023.10.20"
 
 # =============================================
 # FUNKTIONEN
@@ -129,12 +130,78 @@ ubuntu_pro_attach() {
     fi
 }
 
-# Hostname Management (Cross-Distribution)
+# Hostname Management mit spezifischem Schema
 manage_hostname() {
-    local current_hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "UNKNOWN")
-    local short_hostname=$(echo "$current_hostname" | cut -d'.' -f1)
+    log "Konfiguriere Hostname nach Schema"
     
-    log "Konfiguriere Hostname: $current_hostname"
+    # Sammle benötigte Informationen (falls noch nicht vorhanden)
+    if [ -z "$COUNTRY" ] || [ -z "$ASN" ] || [ -z "$IP_ADDRESS" ] || [ -z "$PROVIDER" ]; then
+        log "Sammle Informationen für Hostname-Schema..."
+        COUNTRY=$(curl -4 -s --connect-timeout 5 https://ipinfo.io/country | tr '[:upper:]' '[:lower:]' || echo "xx")
+        IP_ADDRESS=$(curl -4 -s --connect-timeout 5 https://ipinfo.io/ip || echo "0.0.0.0")
+        ASN_INFO=$(curl -4 -s --connect-timeout 5 https://ipinfo.io/org || echo "AS0 unknown")
+        PROVIDER=$(echo "$ASN_INFO" | cut -d ' ' -f2- | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')
+        ASN=$(echo "$ASN_INFO" | cut -d ' ' -f1 | sed 's/AS//')
+    fi
+    
+    # Extrahiere erstes Oktett der IP
+    IP_FIRST_OCTET=$(echo "$IP_ADDRESS" | cut -d '.' -f1)
+    
+    # Beschränke Providernamen auf max. 10 Zeichen und entferne Sonderzeichen
+    PROVIDER_SHORT=$(echo "$PROVIDER" | sed 's/[^a-z0-9\-]/-/g' | cut -c 1-10 | sed 's/-*$//')
+    
+    # Generiere neuen Hostnamen nach Schema
+    NEW_HOSTNAME="${COUNTRY}-${PROVIDER_SHORT}-${ASN}-globalping-${IP_FIRST_OCTET}"
+    
+    # Begrenze Länge auf max. 63 Zeichen (DNS-Limit)
+    if [ ${#NEW_HOSTNAME} -gt 63 ]; then
+        NEW_HOSTNAME=$(echo "$NEW_HOSTNAME" | cut -c 1-63)
+        log "Hostname war zu lang, gekürzt auf: $NEW_HOSTNAME"
+    fi
+    
+    log "Setze neuen Hostname: $NEW_HOSTNAME"
+    
+    # Aktueller Hostname zum Vergleich
+    CURRENT_HOSTNAME=$(hostname)
+    
+    # Setze Hostname nur, wenn er sich geändert hat
+    if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
+        # Methode 1: hostnamectl (systemd-Systeme)
+        if command -v hostnamectl >/dev/null; then
+            hostnamectl set-hostname "$NEW_HOSTNAME" || {
+                log "Warnung: hostnamectl fehlgeschlagen, versuche alternative Methode"
+                # Methode 2: hostname-Befehl
+                hostname "$NEW_HOSTNAME" || {
+                    log "Fehler: Konnte Hostname nicht setzen"
+                    return 1
+                }
+            }
+        else
+            # Methode 2: hostname-Befehl
+            hostname "$NEW_HOSTNAME" || {
+                log "Fehler: Konnte Hostname nicht setzen"
+                return 1
+            }
+            
+            # Bei Nicht-systemd-Systemen: Update in /etc/hostname
+            if [ -f /etc/hostname ]; then
+                echo "$NEW_HOSTNAME" > /etc/hostname || log "Warnung: Konnte /etc/hostname nicht aktualisieren"
+            fi
+            
+            # Bei RHEL/CentOS/etc.: Update in /etc/sysconfig/network
+            if [ -f /etc/sysconfig/network ]; then
+                if grep -q "HOSTNAME=" /etc/sysconfig/network; then
+                    sed -i "s/HOSTNAME=.*/HOSTNAME=$NEW_HOSTNAME/" /etc/sysconfig/network
+                else
+                    echo "HOSTNAME=$NEW_HOSTNAME" >> /etc/sysconfig/network
+                fi
+            fi
+        fi
+        
+        log "Hostname erfolgreich geändert zu: $NEW_HOSTNAME"
+    else
+        log "Hostname ist bereits korrekt: $NEW_HOSTNAME"
+    fi
     
     # Backup der originalen hosts-Datei
     mkdir -p "$TMP_DIR"
@@ -154,19 +221,19 @@ manage_hostname() {
 
     # Versuche, die Datei zu bearbeiten
     {
-        # Alte Einträge bereinigen (für IPv4 und IPv6)
-        sed -i "/^127\.0\.0\.1.*$short_hostname/d" /etc/hosts
-        sed -i "/^::1.*$short_hostname/d" /etc/hosts
+        # Alte Einträge bereinigen
+        sed -i "/^127\.0\.0\.1.*$NEW_HOSTNAME/d" /etc/hosts
+        sed -i "/^::1.*$NEW_HOSTNAME/d" /etc/hosts
 
         # Neue Einträge hinzufügen
-        if ! grep -q "127.0.0.1.*$current_hostname" /etc/hosts; then
-            sed -i "/^127.0.0.1/s/$/ $current_hostname/" /etc/hosts || \
-            echo "127.0.0.1 localhost $current_hostname" >> /etc/hosts
+        if ! grep -q "127.0.0.1.*$NEW_HOSTNAME" /etc/hosts; then
+            sed -i "/^127.0.0.1/s/$/ $NEW_HOSTNAME/" /etc/hosts || \
+            echo "127.0.0.1 localhost $NEW_HOSTNAME" >> /etc/hosts
         fi
 
-        if ! grep -q "::1.*$current_hostname" /etc/hosts; then
-            sed -i "/^::1/s/$/ $current_hostname/" /etc/hosts || \
-            echo "::1 localhost $current_hostname" >> /etc/hosts
+        if ! grep -q "::1.*$NEW_HOSTNAME" /etc/hosts; then
+            sed -i "/^::1/s/$/ $NEW_HOSTNAME/" /etc/hosts || \
+            echo "::1 localhost $NEW_HOSTNAME" >> /etc/hosts
         fi
 
     } || {
@@ -175,10 +242,9 @@ manage_hostname() {
         return 1
     }
 
-    log "Hostname aktualisiert: $current_hostname (Kurzname: $short_hostname)"
+    log "Hostname aktualisiert und in /etc/hosts eingetragen: $NEW_HOSTNAME"
     return 0
 }
-
 # Systeminformationen sammeln
 get_system_info() {
     log "Erfasse detaillierte Systeminformationen"
@@ -441,7 +507,6 @@ update_system() {
     log "Systemaktualisierung abgeschlossen"
     return 0
 }
-
 # Docker installieren
 install_docker() {
     log "Installiere Docker"
@@ -565,6 +630,520 @@ install_docker_compose() {
     return 0
 }
 
+# Globalping-Probe installieren und konfigurieren
+install_globalping_probe() {
+    log "Installiere Globalping-Probe"
+    
+    # Voraussetzungen prüfen
+    if [ -z "$ADOPTION_TOKEN" ]; then
+        log "Fehler: Kein Adoption-Token angegeben. Probe-Installation nicht möglich."
+        notify error "❌ Globalping-Probe konnte nicht installiert werden: Kein Adoption-Token"
+        return 1
+    fi
+    
+    # Docker-Installation prüfen und ggf. installieren
+    if ! command -v docker >/dev/null; then
+        log "Docker wird für Globalping-Probe benötigt, installiere..."
+        install_docker || {
+            log "Fehler: Docker-Installation fehlgeschlagen, Probe kann nicht installiert werden"
+            notify error "❌ Globalping-Probe-Installation fehlgeschlagen: Docker nicht verfügbar"
+            return 1
+        }
+    fi
+    
+    # Docker Compose prüfen und ggf. installieren
+    if ! command -v docker-compose >/dev/null; then
+        log "Docker Compose wird benötigt, installiere..."
+        install_docker_compose || {
+            log "Fehler: Docker Compose-Installation fehlgeschlagen"
+            notify error "❌ Globalping-Probe-Installation fehlgeschlagen: Docker Compose nicht verfügbar"
+            return 1
+        }
+    fi
+    
+    # Verzeichnis erstellen
+    mkdir -p /opt/globalping || {
+        log "Fehler: Konnte Verzeichnis /opt/globalping nicht erstellen"
+        return 1
+    }
+    
+    # Docker Compose-Datei erstellen
+    cat > /opt/globalping/docker-compose.yml << EOF
+version: '3'
+services:
+  probe:
+    image: ghcr.io/jsdelivr/globalping-probe:latest
+    container_name: globalping-probe
+    restart: always
+    environment:
+      - ADOPTION_TOKEN=${ADOPTION_TOKEN}
+    volumes:
+      - ./probe-data:/home/node/.globalping
+    network_mode: host
+EOF
+    
+    # Probe starten
+    cd /opt/globalping && docker-compose up -d || {
+        log "Fehler: Konnte Globalping-Probe nicht starten"
+        notify error "❌ Globalping-Probe-Start fehlgeschlagen"
+        return 1
+    }
+    
+    # Warten auf Probe-Initialisierung
+    log "Warte auf Initialisierung der Globalping-Probe..."
+    sleep 10
+    
+    # Prüfen, ob Container läuft
+    if docker ps | grep -q globalping-probe; then
+        log "Globalping-Probe erfolgreich gestartet"
+        notify success "✅ Globalping-Probe erfolgreich installiert und gestartet"
+    else
+        log "Fehler: Globalping-Probe-Container nicht gefunden nach Start"
+        notify error "❌ Globalping-Probe-Start fehlgeschlagen: Container nicht aktiv"
+        return 1
+    fi
+    
+    # Maintenance-Skript erstellen
+    create_globalping_maintenance
+    
+    return 0
+}
+
+# Erstelle Wartungsskript für Globalping
+create_globalping_maintenance() {
+    log "Erstelle Globalping-Wartungsskript"
+    
+    cat > /usr/local/bin/globalping-maintenance << 'EOF'
+#!/bin/bash
+set -eo pipefail
+
+LOG_FILE="/var/log/globalping-maintenance.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Sicherstellen, dass das Log-Verzeichnis existiert
+mkdir -p "$(dirname "$LOG_FILE")"
+
+log "Starte Globalping-Wartung"
+
+# Probe-Update durchführen
+log "Aktualisiere Globalping-Probe..."
+cd /opt/globalping && docker-compose pull && docker-compose up -d
+
+# Alte Images aufräumen
+log "Bereinige alte Docker-Images..."
+docker image prune -af --filter "until=24h"
+
+# Logs rotieren
+log "Rotiere Logs..."
+find /opt/globalping -name "*.log" -type f -size +100M -exec truncate -s 0 {} \;
+
+log "Globalping-Wartung abgeschlossen"
+EOF
+    
+    chmod +x /usr/local/bin/globalping-maintenance
+    
+    # Cron-Job einrichten
+    if ! crontab -l | grep -q "globalping-maintenance"; then
+        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+        log "Cron-Job für Globalping-Wartung eingerichtet"
+    fi
+    
+    log "Globalping-Wartungsskript erstellt und eingerichtet"
+}
+
+# Globalping-Probe Status prüfen
+check_globalping_status() {
+    log "Prüfe Status der Globalping-Probe"
+    
+    if ! docker ps -a | grep -q globalping-probe; then
+        log "Globalping-Probe ist nicht installiert"
+        return 1
+    fi
+    
+    local container_status=$(docker inspect -f '{{.State.Status}}' globalping-probe 2>/dev/null || echo "error")
+    
+    if [ "$container_status" = "running" ]; then
+        log "Globalping-Probe ist aktiv und läuft"
+        
+        # Uptime prüfen
+        local uptime=$(docker inspect -f '{{.State.StartedAt}}' globalping-probe | xargs -I{} date -d {} '+%s')
+        local now=$(date '+%s')
+        local uptime_seconds=$((now - uptime))
+        local uptime_days=$((uptime_seconds / 86400))
+        local uptime_hours=$(( (uptime_seconds % 86400) / 3600 ))
+        
+        log "Probe läuft seit $uptime_days Tagen und $uptime_hours Stunden"
+        
+        # Logs auf Fehler prüfen
+        local error_count=$(docker logs --tail 100 globalping-probe 2>&1 | grep -c -i "error" || true)
+        if [ "$error_count" -gt 5 ]; then
+            log "Warnung: $error_count Fehler in den letzten 100 Log-Einträgen gefunden"
+            notify warn "⚠️ Globalping-Probe zeigt $error_count Fehler in den Logs"
+        fi
+        
+        return 0
+    else
+        log "Globalping-Probe ist nicht aktiv (Status: $container_status)"
+        notify error "❌ Globalping-Probe ist nicht aktiv (Status: $container_status)"
+        
+        # Versuche Container zu starten, wenn er existiert aber nicht läuft
+        if [ "$container_status" != "error" ]; then
+            log "Versuche Globalping-Probe neu zu starten..."
+            docker start globalping-probe && {
+                log "Globalping-Probe erfolgreich neu gestartet"
+                notify success "✅ Globalping-Probe erfolgreich neu gestartet"
+                return 0
+            } || {
+                log "Fehler: Konnte Globalping-Probe nicht neu starten"
+                return 1
+            }
+        fi
+        
+        return 1
+    fi
+}
+# Architektur erkennen und anpassen
+detect_architecture() {
+    log "Erkenne System-Architektur"
+    
+    ARCH=$(uname -m)
+    IS_ARM=false
+    
+    case "$ARCH" in
+        arm*|aarch*)
+            IS_ARM=true
+            log "ARM-Architektur erkannt: $ARCH"
+            ;;
+        x86_64|amd64)
+            log "x86_64-Architektur erkannt"
+            ;;
+        *)
+            log "Unbekannte Architektur: $ARCH"
+            ;;
+    esac
+    
+    # Für Raspberry Pi spezifische Erkennung
+    if [ "$IS_ARM" = "true" ] && [ -f /proc/device-tree/model ] && grep -q "Raspberry Pi" /proc/device-tree/model; then
+        IS_RASPBERRY_PI=true
+        PI_MODEL=$(tr -d '\0' < /proc/device-tree/model)
+        log "Raspberry Pi erkannt: $PI_MODEL"
+        
+        # Optimierungen für Raspberry Pi
+        optimize_for_raspberry_pi
+    fi
+    
+    return 0
+}
+
+# Raspberry Pi-spezifische Optimierungen
+optimize_for_raspberry_pi() {
+    log "Führe Raspberry Pi-spezifische Optimierungen durch"
+    
+    # Swap-Optimierung für bessere SD-Karten-Lebensdauer
+    if [ -f /etc/dphys-swapfile ]; then
+        log "Optimiere Swap-Einstellungen"
+        # Sichern der ursprünglichen Datei
+        cp /etc/dphys-swapfile /etc/dphys-swapfile.backup
+        
+        # Weniger häufige Swap-Nutzung
+        echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
+        
+        # Angemessene Swap-Größe setzen (basierend auf RAM)
+        TOTAL_MEM=$(free -m | grep Mem | awk '{print $2}')
+        if [ "$TOTAL_MEM" -lt 1024 ]; then
+            # Wenig RAM, mehr Swap
+            echo "CONF_SWAPSIZE=1024" >> /etc/dphys-swapfile
+        else
+            # Mehr RAM, weniger Swap
+            echo "CONF_SWAPSIZE=512" >> /etc/dphys-swapfile
+        fi
+        
+        # Swap-Dienst neu starten
+        /etc/init.d/dphys-swapfile restart
+    fi
+    
+    # Überprüfen und Einstellen des GPU-Speichers (minimal für Headless-Betrieb)
+    if [ -f /boot/config.txt ]; then
+        log "Konfiguriere GPU-Speicher für Headless-Betrieb"
+        
+        if ! grep -q "^gpu_mem=" /boot/config.txt; then
+            echo "gpu_mem=16" >> /boot/config.txt
+            log "GPU-Speicher auf 16MB eingestellt (Headless-Optimierung)"
+        fi
+    fi
+    
+    # Temperaturüberwachung einrichten
+    if command -v vcgencmd >/dev/null; then
+        log "Richte Temperaturüberwachung ein"
+        
+        # Erstelle Skript zur Temperaturüberwachung
+        cat > /usr/local/bin/check-pi-temp << 'EOF'
+#!/bin/bash
+TEMP=$(vcgencmd measure_temp | cut -d= -f2 | cut -d\' -f1)
+echo "Raspberry Pi Temperatur: $TEMP°C"
+if (( $(echo "$TEMP > 75" | bc -l) )); then
+    echo "WARNUNG: Temperatur über 75°C!" >&2
+    exit 1
+fi
+exit 0
+EOF
+        chmod +x /usr/local/bin/check-pi-temp
+        
+        # Cron-Job für stündliche Temperaturprüfung
+        if ! crontab -l | grep -q "check-pi-temp"; then
+            (crontab -l 2>/dev/null; echo "0 * * * * /usr/local/bin/check-pi-temp | logger -t pi-temp") | crontab -
+            log "Cron-Job für Temperaturüberwachung eingerichtet"
+        fi
+    fi
+    
+    log "Raspberry Pi-Optimierungen abgeschlossen"
+    return 0
+}
+
+# Selbstdiagnose durchführen
+run_self_diagnosis() {
+    log "Führe Selbstdiagnose durch"
+    
+    # Ergebnis-Array
+    local issues=()
+    
+    # 1. Speicherplatz prüfen
+    log "Prüfe Speicherplatz..."
+    local disk_usage=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
+    if [ "$disk_usage" -gt 85 ]; then
+        issues+=("Kritischer Speicherplatz: $disk_usage% belegt")
+    fi
+    
+    # 2. RAM-Nutzung prüfen
+    log "Prüfe RAM-Nutzung..."
+    local free_memory=$(free -m | awk '/Mem:/ {print $4}')
+    if [ "$free_memory" -lt 100 ]; then
+        issues+=("Wenig freier RAM: Nur $free_memory MB verfügbar")
+    fi
+    
+    # 3. CPU-Auslastung prüfen
+    log "Prüfe CPU-Auslastung..."
+    local load=$(cat /proc/loadavg | cut -d' ' -f1)
+    local cores=$(nproc)
+    if (( $(echo "$load > $cores" | bc -l) )); then
+        issues+=("Hohe CPU-Last: $load (Kerne: $cores)")
+    fi
+    
+    # 4. Systemdienste prüfen
+    log "Prüfe kritische Systemdienste..."
+    local critical_services=("systemd-journald" "systemd-logind" "cron" "sshd")
+    for service in "${critical_services[@]}"; do
+        if systemctl is-active "$service" >/dev/null 2>&1; then
+            :  # Dienst läuft
+        else
+            issues+=("Kritischer Dienst nicht aktiv: $service")
+        fi
+    done
+    
+    # 5. Netzwerk-Interface prüfen
+    log "Prüfe Netzwerk-Interfaces..."
+    if ! ip link | grep -q "UP"; then
+        issues+=("Kein aktives Netzwerk-Interface gefunden")
+    fi
+    
+    # 6. Docker-Status prüfen (falls vorhanden)
+    if command -v docker >/dev/null; then
+        log "Prüfe Docker-Status..."
+        if ! systemctl is-active docker >/dev/null 2>&1; then
+            issues+=("Docker-Dienst ist nicht aktiv")
+        fi
+        
+        # Unhealthy Container finden
+        local unhealthy_containers=$(docker ps --filter health=unhealthy -q | wc -l)
+        if [ "$unhealthy_containers" -gt 0 ]; then
+            issues+=("$unhealthy_containers Container mit Status 'unhealthy'")
+        fi
+    fi
+    
+    # 7. Globalping-Probe prüfen (falls installiert)
+    if docker ps -a | grep -q globalping-probe; then
+        log "Prüfe Globalping-Probe..."
+        if ! docker ps | grep -q globalping-probe; then
+            issues+=("Globalping-Probe ist nicht aktiv")
+        fi
+    fi
+    
+    # Ergebnisse anzeigen
+    if [ ${#issues[@]} -eq 0 ]; then
+        log "Selbstdiagnose abgeschlossen: Keine Probleme gefunden"
+        return 0
+    else
+        log "Selbstdiagnose abgeschlossen: ${#issues[@]} Probleme gefunden"
+        for issue in "${issues[@]}"; do
+            log "PROBLEM: $issue"
+        done
+        
+        # Kritische Probleme an Telegram senden
+        notify warn "⚠️ Selbstdiagnose: ${#issues[@]} Probleme gefunden"
+        return 1
+    fi
+}
+
+# Netzwerk-Diagnose durchführen
+run_network_diagnosis() {
+    log "Führe Netzwerk-Diagnose durch"
+    
+    local issues=()
+    
+    # 1. DNS-Auflösung testen
+    log "Teste DNS-Auflösung..."
+    if ! host -W 2 google.com >/dev/null 2>&1 && ! host -W 2 cloudflare.com >/dev/null 2>&1; then
+        issues+=("DNS-Auflösung fehlgeschlagen")
+    fi
+    
+    # 2. Paketverlustraten messen
+    log "Messe Paketverlustrate..."
+    local packet_loss=$(ping -c 10 -q 1.1.1.1 2>/dev/null | grep -oP '\d+(?=% packet loss)' || echo "100")
+    if [ "$packet_loss" -gt 5 ]; then
+        issues+=("Hohe Paketverlustrate: $packet_loss%")
+    fi
+    
+    # 3. Latenzen zu verschiedenen Zielen messen
+    log "Messe Netzwerklatenz..."
+    local targets=("1.1.1.1" "8.8.8.8" "google.com")
+    local high_latency=false
+    
+    for target in "${targets[@]}"; do
+        local latency=$(ping -c 3 -q "$target" 2>/dev/null | grep -oP 'avg=\K[0-9\.]+' || echo "999")
+        log "Latenz zu $target: ${latency}ms"
+        
+        if (( $(echo "$latency > 200" | bc -l) )); then
+            high_latency=true
+            issues+=("Hohe Latenz zu $target: ${latency}ms")
+        fi
+    done
+    
+    # 4. MTU-Größe testen
+    log "Prüfe MTU-Größe..."
+    local default_interface=$(ip route | grep default | head -1 | awk '{print $5}')
+    if [ -n "$default_interface" ]; then
+        local current_mtu=$(ip link show "$default_interface" | grep -oP 'mtu \K\d+')
+        log "Aktuelle MTU auf $default_interface: $current_mtu"
+        
+        if [ "$current_mtu" -lt 1400 ]; then
+            issues+=("Ungewöhnlich niedrige MTU: $current_mtu auf $default_interface")
+        fi
+    else
+        issues+=("Kein Standard-Gateway gefunden")
+    fi
+    
+    # 5. Routing-Tabelle prüfen
+    log "Prüfe Routing-Tabelle..."
+    if ! ip route | grep -q "^default"; then
+        issues+=("Keine Standard-Route gefunden")
+    fi
+    
+    # 6. IPv6-Konnektivität prüfen
+    log "Prüfe IPv6-Konnektivität..."
+    if ip -6 addr | grep -q "scope global"; then
+        if ! ping -6 -c 1 -W 3 2606:4700:4700::1111 >/dev/null 2>&1; then
+            issues+=("IPv6 konfiguriert, aber keine Konnektivität")
+        else
+            log "IPv6-Konnektivität verfügbar"
+        fi
+    else
+        log "Keine globale IPv6-Adresse konfiguriert"
+    fi
+    
+    # Ergebnisse anzeigen
+    if [ ${#issues[@]} -eq 0 ]; then
+        log "Netzwerk-Diagnose abgeschlossen: Keine Probleme gefunden"
+        return 0
+    else
+        log "Netzwerk-Diagnose abgeschlossen: ${#issues[@]} Probleme gefunden"
+        for issue in "${issues[@]}"; do
+            log "NETZWERK-PROBLEM: $issue"
+        done
+        
+        # Probleme an Telegram senden
+        notify warn "⚠️ Netzwerk-Diagnose: ${#issues[@]} Probleme gefunden"
+        return 1
+    fi
+}
+
+# Debug-Modus (detailliertes Logging)
+enable_debug_mode() {
+    log "Aktiviere Debug-Modus"
+    
+    # Erweitere das Logging
+    set -x
+    
+    # Speichere Debug-Log in separater Datei
+    exec 19> "/var/log/globalping-debug-$(date +%s).log"
+    BASH_XTRACEFD=19
+    
+    DEBUG_MODE=true
+    log "Debug-Modus aktiviert, ausführliches Logging in Datei"
+    
+    return 0
+}
+
+# Haupt-Diagnosefunktion
+run_diagnostics() {
+    log "Starte umfassende Systemdiagnose"
+    
+    # Erstelle Diagnose-Verzeichnis
+    local diag_dir="/var/log/globalping-diagnostics/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$diag_dir"
+    
+    # Speichere Systeminfos
+    log "Sammle Systeminformationen..."
+    uname -a > "$diag_dir/uname.txt"
+    cat /etc/os-release > "$diag_dir/os-release.txt"
+    free -h > "$diag_dir/memory.txt"
+    df -h > "$diag_dir/disk.txt"
+    lscpu > "$diag_dir/cpu.txt"
+    
+    # Führe Diagnosetests durch
+    log "Führe Selbstdiagnose durch..."
+    run_self_diagnosis > "$diag_dir/self-diagnosis.txt" 2>&1
+    
+    log "Führe Netzwerk-Diagnose durch..."
+    run_network_diagnosis > "$diag_dir/network-diagnosis.txt" 2>&1
+    
+    # Speichere Docker-Status, falls vorhanden
+    if command -v docker >/dev/null; then
+        log "Sammle Docker-Informationen..."
+        docker info > "$diag_dir/docker-info.txt" 2>&1
+        docker ps -a > "$diag_dir/docker-ps.txt" 2>&1
+        docker stats --no-stream > "$diag_dir/docker-stats.txt" 2>&1
+        
+        # Probe-Logs, falls vorhanden
+        if docker ps -a | grep -q globalping-probe; then
+            docker logs globalping-probe > "$diag_dir/globalping-logs.txt" 2>&1
+            docker inspect globalping-probe > "$diag_dir/globalping-inspect.txt" 2>&1
+        fi
+    fi
+    
+    # System-Logs sammeln
+    log "Sammle System-Logs..."
+    journalctl -n 1000 > "$diag_dir/journalctl.txt" 2>&1
+    dmesg > "$diag_dir/dmesg.txt" 2>&1
+    
+    if [ -f "/var/log/syslog" ]; then
+        tail -n 1000 /var/log/syslog > "$diag_dir/syslog.txt"
+    fi
+    
+    # Ergebnis-Archiv erstellen
+    local archive_file="/root/globalping-diagnostics-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$archive_file" -C "$(dirname "$diag_dir")" "$(basename "$diag_dir")"
+    
+    log "Diagnose abgeschlossen. Ergebnisse in: $archive_file"
+    notify success "✅ Systemdiagnose abgeschlossen. Ergebnisse gespeichert."
+    
+    # Aufräumen
+    rm -rf "$diag_dir"
+    
+    return 0
+}
 # Erstelle Hauptfunktion
 main() {
     log "Starte Server-Setup-Skript"
@@ -586,6 +1165,9 @@ main() {
     # Installiere sudo, falls nicht vorhanden
     install_sudo || log "Warnung: sudo-Installation fehlgeschlagen"
     
+    # Erkenne Architektur
+    detect_architecture
+    
     install_dependencies || log "Warnung: Installation der Abhängigkeiten fehlgeschlagen"
     update_system || log "Warnung: Systemaktualisierung fehlgeschlagen"
     get_system_info
@@ -599,11 +1181,15 @@ main() {
         log "Kein Ubuntu-System erkannt, überspringe Ubuntu Pro Aktivierung"
     fi
     
-    # Installiere Docker und Docker Compose, falls gewünscht
-    if [ "$INSTALL_DOCKER" = "true" ]; then
-        install_docker || log "Warnung: Docker-Installation fehlgeschlagen"
-        install_docker_compose || log "Warnung: Docker Compose-Installation fehlgeschlagen"
+    # Globalping-Probe installieren, wenn Adoption-Token angegeben
+    if [ -n "$ADOPTION_TOKEN" ]; then
+        install_globalping_probe || log "Warnung: Globalping-Probe-Installation fehlgeschlagen"
+    else
+        log "Kein Adoption-Token angegeben, überspringe Globalping-Probe-Installation"
     fi
+    
+    # Führe Diagnose durch
+    run_diagnostics
     
     # Erstelle Zusammenfassung
     create_summary
@@ -642,6 +1228,7 @@ create_summary() {
         echo "sudo: $(if command -v sudo >/dev/null; then echo "Ja ($(sudo --version | head -1))"; else echo "Nein"; fi)"
         echo "Docker: $(if command -v docker >/dev/null; then echo "Ja ($(docker --version))"; else echo "Nein"; fi)"
         echo "Docker Compose: $(if command -v docker-compose >/dev/null; then echo "Ja ($(docker-compose --version))"; else echo "Nein"; fi)"
+        echo "Globalping-Probe: $(if docker ps | grep -q globalping-probe; then echo "Ja (Aktiv)"; elif docker ps -a | grep -q globalping-probe; then echo "Ja (Inaktiv)"; else echo "Nein"; fi)"
         
         echo -e "\n--- OFFENE PORTS ---"
         if command -v netstat >/dev/null; then
@@ -663,27 +1250,30 @@ create_summary() {
 # Hilfefunktion
 show_help() {
     cat << EOF
-Server-Setup-Skript
+Server-Setup-Skript v$SCRIPT_VERSION
 
 Dieses Skript automatisiert die Einrichtung eines Linux-Servers mit
-grundlegenden Verwaltungsfunktionen.
+Globalping-Probe und grundlegenden Verwaltungsfunktionen.
 
 Verwendung: $0 [OPTIONEN]
 
 Optionen:
-  -h, --help              Zeigt diese Hilfe an
-  -d, --docker            Installiert Docker und Docker Compose
-  -l, --log DATEI         Gibt eine alternative Log-Datei an
-  --adoption-token TOKEN  Setzt den Adoption-Token
-  --telegram-token TOKEN  Setzt den Telegram-Bot-Token
-  --telegram-chat ID      Setzt die Telegram-Chat-ID
-  --ubuntu-token TOKEN    Setzt den Ubuntu Pro Token
-  --ssh-key SCHLÜSSEL     Fügt einen SSH-Schlüssel hinzu
+  -h, --help                  Zeigt diese Hilfe an
+  -d, --docker                Installiert Docker und Docker Compose
+  -l, --log DATEI             Gibt eine alternative Log-Datei an
+  --adoption-token TOKEN      Setzt den Globalping Adoption-Token
+  --telegram-token TOKEN      Setzt den Telegram-Bot-Token
+  --telegram-chat ID          Setzt die Telegram-Chat-ID
+  --ubuntu-token TOKEN        Setzt den Ubuntu Pro Token
+  --ssh-key SCHLÜSSEL         Fügt einen SSH-Schlüssel hinzu
+  --diagnose                  Führt umfassende Systemdiagnose durch
+  --debug                     Aktiviert ausführliches Logging
+  --auto-update               Führt automatisches Update durch
 
 Beispiele:
-  $0                      Führt Basiseinrichtung aus
-  $0 -d                   Installiert Docker und Docker Compose
-  $0 --log /var/log/server-setup.log
+  $0 --adoption-token "xxx"   Richtet einen Globalping-Probe-Server ein
+  $0 --diagnose               Führt Diagnose auf bestehendem Server durch
+  $0 --help                   Zeigt diese Hilfe an
 
 EOF
     exit 0
@@ -693,6 +1283,7 @@ EOF
 process_args() {
     # Standardwerte
     INSTALL_DOCKER="false"
+    RUN_DIAGNOSTICS_ONLY="false"
     
     # Argumente verarbeiten
     while [ $# -gt 0 ]; do
@@ -763,12 +1354,27 @@ process_args() {
                     exit 1
                 fi
                 ;;
+            --diagnose)
+                RUN_DIAGNOSTICS_ONLY="true"
+                shift
+                ;;
+            --debug)
+                enable_debug_mode
+                shift
+                ;;
             *)
                 log "Unbekannte Option: $1"
                 show_help
                 ;;
         esac
     done
+    
+    # Wenn nur Diagnose ausgeführt werden soll
+    if [ "$RUN_DIAGNOSTICS_ONLY" = "true" ]; then
+        check_root || { log "Root-Check fehlgeschlagen"; exit 1; }
+        run_diagnostics
+        exit 0
+    fi
 }
 
 # Trap für Error-Handling
