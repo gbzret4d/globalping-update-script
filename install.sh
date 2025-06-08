@@ -121,8 +121,8 @@ enhanced_notify() {
             ;;
     esac
     
-    # Erstelle einfache, sichere Nachricht (ohne komplexes Escaping)
-    local formatted_message="${icon} ${emoji}
+    # Erstelle EINFACHE Nachricht (ohne komplexe Formatierung)
+    local simple_message="${icon} ${emoji}
 
 Country: ${COUNTRY}
 Hostname: ${HOSTNAME_NEW}
@@ -130,93 +130,143 @@ IP: ${PUBLIC_IP}
 ASN: ${ASN}
 Provider: ${PROVIDER}
 
-${title}:
-${message}"
+${title}: ${message}"
     
-    # Teste Telegram-Token und Chat-ID zuerst
-    log "Teste Telegram-Verbindung..."
-    local test_response
-    test_response=$(curl -s -X GET \
+    # Bereinige die Nachricht von problematischen Zeichen
+    simple_message=$(echo "${simple_message}" | tr -cd '[:print:]\n\t' | head -c 4000)
+    
+    log "Sende Telegram-Nachricht..."
+    log "DEBUG: Nachrichtenlänge: $(echo "${simple_message}" | wc -c) Zeichen"
+    
+    # Sende mit der GLEICHEN Methode wie die erfolgreichen Tests
+    local response
+    response=$(curl -s -X POST \
         --connect-timeout 10 \
-        --max-time 15 \
-        --user-agent "GlobalpingInstaller/1.0" \
-        "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/getMe" 2>&1)
+        --max-time 30 \
+        -d "chat_id=${TELEGRAM_CHAT}" \
+        -d "text=${simple_message}" \
+        "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" 2>&1)
     
-    if ! echo "${test_response}" | grep -q '"ok":true'; then
-        log "FEHLER: Telegram-Token ungültig oder API nicht erreichbar"
-        log "API-Antwort: ${test_response}"
-        return 1
-    fi
+    # Debug: Zeige die komplette API-Antwort
+    log "DEBUG: Telegram API Antwort: ${response}"
     
-    # Sende Nachricht mit verbesserter Fehlerbehandlung
-    local attempt=0
-    local max_attempts=3
-    
-    while [[ ${attempt} -lt ${max_attempts} ]]; do
-        ((attempt++))
-        log "Sende Telegram-Nachricht (Versuch ${attempt}/${max_attempts})"
+    # Prüfe Antwort
+    if echo "${response}" | grep -q '"ok":true'; then
+        local message_id
+        message_id=$(echo "${response}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unknown")
+        log "Telegram-Benachrichtigung erfolgreich gesendet (Message-ID: ${message_id})"
+        return 0
+    else
+        log "FEHLER bei Telegram-Nachricht: ${response}"
         
-        local response
-        response=$(curl -s -X POST \
-            --connect-timeout 10 \
-            --max-time 30 \
-            --user-agent "GlobalpingInstaller/1.0" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT}" \
-            --data-urlencode "text=${formatted_message}" \
-            --data-urlencode "parse_mode=HTML" \
+        # Fallback: Sende kürzere Nachricht
+        local short_message="${icon} ${emoji} - ${title}: ${message}"
+        short_message=$(echo "${short_message}" | head -c 500)
+        
+        log "Versuche kürzere Nachricht..."
+        local fallback_response
+        fallback_response=$(curl -s -X POST \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${short_message}" \
             "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" 2>&1)
         
-        # Prüfe Antwort
-        if echo "${response}" | grep -q '"ok":true'; then
-            log "Telegram-Benachrichtigung erfolgreich gesendet"
+        if echo "${fallback_response}" | grep -q '"ok":true'; then
+            log "Kurze Telegram-Nachricht erfolgreich gesendet"
             return 0
         else
-            log "FEHLER bei Telegram-Nachricht (Versuch ${attempt}): ${response}"
-            
-            # Prüfe auf spezifische Fehler
-            if echo "${response}" | grep -q "chat not found\|Forbidden"; then
-                log "FEHLER: Chat-ID '${TELEGRAM_CHAT}' ungültig oder Bot wurde blockiert"
-                return 1
-            elif echo "${response}" | grep -q "Too Many Requests"; then
-                log "Rate-Limit erreicht, warte länger..."
-                sleep $((attempt * 10))
-            else
-                sleep $((attempt * 2))
-            fi
+            log "Auch kurze Nachricht fehlgeschlagen: ${fallback_response}"
+            return 1
         fi
-    done
-    
-    log "Telegram-Benachrichtigung fehlgeschlagen nach ${max_attempts} Versuchen"
-    return 1
+    fi
 }
-
-# Test-Funktion für Telegram
-test_telegram_config() {
-    log "Teste Telegram-Konfiguration..."
+# KORRIGIERTE Telegram-Benachrichtigung
+enhanced_notify() {
+    local level="$1"
+    local title="$2"
+    local message="$3"
+    
+    # Nur Fehler und erste Installation senden
+    if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then
+        return 0
+    fi
     
     if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
-        log "Telegram-Token oder Chat-ID nicht gesetzt"
-        return 1
+        log "Telegram-Konfiguration nicht vollständig - überspringe Benachrichtigung"
+        return 0
     fi
     
-    # Teste getMe API
-    local me_response
-    me_response=$(curl -s "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/getMe")
+    # Sammle aktuelle Systeminfo falls nicht vorhanden
+    [[ -z "${COUNTRY}" ]] && get_enhanced_system_info
     
-    if ! echo "${me_response}" | grep -q '"ok":true'; then
-        log "FEHLER: Telegram-Token ungültig"
-        log "API-Antwort: ${me_response}"
-        return 1
+    local icon emoji
+    case "${level}" in
+        "error")
+            icon="❌"
+            emoji="Fehler im Skript"
+            ;;
+        "install_success")
+            icon="✅"
+            emoji="Installation erfolgreich"
+            ;;
+    esac
+    
+    # Erstelle EINFACHE Nachricht (ohne komplexe Formatierung)
+    local simple_message="${icon} ${emoji}
+
+Country: ${COUNTRY}
+Hostname: ${HOSTNAME_NEW}
+IP: ${PUBLIC_IP}
+ASN: ${ASN}
+Provider: ${PROVIDER}
+
+${title}: ${message}"
+    
+    # Bereinige die Nachricht von problematischen Zeichen
+    simple_message=$(echo "${simple_message}" | tr -cd '[:print:]\n\t' | head -c 4000)
+    
+    log "Sende Telegram-Nachricht..."
+    log "DEBUG: Nachrichtenlänge: $(echo "${simple_message}" | wc -c) Zeichen"
+    
+    # Sende mit der GLEICHEN Methode wie die erfolgreichen Tests
+    local response
+    response=$(curl -s -X POST \
+        --connect-timeout 10 \
+        --max-time 30 \
+        -d "chat_id=${TELEGRAM_CHAT}" \
+        -d "text=${simple_message}" \
+        "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    
+    # Debug: Zeige die komplette API-Antwort
+    log "DEBUG: Telegram API Antwort: ${response}"
+    
+    # Prüfe Antwort
+    if echo "${response}" | grep -q '"ok":true'; then
+        local message_id
+        message_id=$(echo "${response}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unknown")
+        log "Telegram-Benachrichtigung erfolgreich gesendet (Message-ID: ${message_id})"
+        return 0
+    else
+        log "FEHLER bei Telegram-Nachricht: ${response}"
+        
+        # Fallback: Sende kürzere Nachricht
+        local short_message="${icon} ${emoji} - ${title}: ${message}"
+        short_message=$(echo "${short_message}" | head -c 500)
+        
+        log "Versuche kürzere Nachricht..."
+        local fallback_response
+        fallback_response=$(curl -s -X POST \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${short_message}" \
+            "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+        
+        if echo "${fallback_response}" | grep -q '"ok":true'; then
+            log "Kurze Telegram-Nachricht erfolgreich gesendet"
+            return 0
+        else
+            log "Auch kurze Nachricht fehlgeschlagen: ${fallback_response}"
+            return 1
+        fi
     fi
-    
-    local bot_name
-    bot_name=$(echo "${me_response}" | grep -o '"username":"[^"]*"' | cut -d'"' -f4 || echo "unbekannt")
-    log "Bot gefunden: @${bot_name}"
-    
-    # Sende Test-Nachricht
-    enhanced_notify "install_success" "Telegram-Test" "Test-Nachricht erfolgreich!"
-    
-    return $?
 }
 
 # Verbesserter Error-Handler
