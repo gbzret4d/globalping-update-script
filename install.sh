@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.3.0"
+readonly SCRIPT_VERSION="2025.06.08-v1.2.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -88,6 +88,203 @@ get_enhanced_system_info() {
     fi
     
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
+}
+
+# OPTIMIERTE Telegram-Benachrichtigung mit integrierten Links
+enhanced_notify() {
+    local level="$1"
+    local title="$2"
+    local message="$3"
+    
+    # Nur Fehler und erste Installation senden
+    if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then
+        return 0
+    fi
+    
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        log "Telegram-Konfiguration nicht vollständig"
+        return 0
+    fi
+    
+    # Sammle aktuelle Systeminfo falls nicht vorhanden
+    [[ -z "${COUNTRY}" ]] && get_enhanced_system_info
+    
+    local icon emoji
+    case "${level}" in
+        "error")
+            icon="❌"
+            emoji="KRITISCHER FEHLER"
+            ;;
+        "install_success")
+            icon="✅"
+            emoji="INSTALLATION ERFOLGREICH"
+            ;;
+    esac
+    
+    # Erstelle erweiterte Nachricht basierend auf Level
+    local extended_message
+    if [[ "${level}" == "install_success" ]]; then
+        # Sammle Systeminformationen SICHER
+        local ram_info disk_info swap_info load_info
+        local auto_update_status ssh_status ubuntu_pro_status
+        local globalping_status docker_installed
+        
+        # Sichere Sammlung der Systeminformationen
+        ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
+        disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" belegt)"}' || echo "unbekannt")
+        swap_info=$(free -h 2>/dev/null | grep Swap | awk '{print $2}' || echo "0B")
+        load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
+        
+        # Status-Informationen (KORRIGIERT - ohne sensible Daten)
+        auto_update_status=$(systemctl is-enabled globalping-update.timer 2>/dev/null || echo "crontab")
+        ssh_status="${SSH_KEY:+✓ Konfiguriert}${SSH_KEY:-✗ Nicht gesetzt}"
+        ubuntu_pro_status="${UBUNTU_PRO_TOKEN:+✓ Aktiv}${UBUNTU_PRO_TOKEN:-✗ Nicht verwendet}"
+        
+        # Docker & Globalping Status (vereinfacht)
+        if command -v docker >/dev/null 2>&1; then
+            docker_installed="✓ Installiert"
+            if docker ps --format "{{.Names}}" 2>/dev/null | grep -q globalping; then
+                globalping_status="✓ Aktiv"
+            else
+                globalping_status="✗ Nicht gefunden"
+            fi
+        else
+            docker_installed="✗ Nicht installiert"
+            globalping_status="✗ Docker fehlt"
+        fi
+        
+        # Erweiterte Success-Nachricht mit integrierten Links (Markdown)
+        extended_message="${icon} ${emoji}
+
+🌍 SERVER-DETAILS:
+├─ Land: ${COUNTRY}
+├─ Hostname: ${HOSTNAME_NEW}
+├─ IP-Adresse: [${PUBLIC_IP}](https://ipinfo.io/${PUBLIC_IP})
+├─ Provider: [${PROVIDER}](https://ipinfo.io/${ASN})
+├─ ASN: [${ASN}](https://bgp.he.net/${ASN})
+└─ Virtualisierung: $(systemd-detect-virt 2>/dev/null || echo "Bare Metal")
+
+💾 SYSTEM-STATUS:
+├─ RAM: ${ram_info}
+├─ Festplatte: ${disk_info}
+├─ Swap: ${swap_info}
+└─ Load: ${load_info}
+
+🔧 DIENSTE:
+├─ Docker: ${docker_installed}
+├─ Globalping: ${globalping_status}
+├─ Auto-Update: ${auto_update_status}
+├─ SSH-Schlüssel: ${ssh_status}
+├─ Ubuntu Pro: ${ubuntu_pro_status}
+└─ Telegram: ✓ Aktiv
+
+📋 ${title}:
+${message}
+
+🔗 WEITERE LINKS:
+├─ [WHOIS-Details](https://whois.net/ip/${PUBLIC_IP})
+├─ [Geo-Karte](https://db-ip.com/${PUBLIC_IP})
+└─ [BGP-Routing](https://bgp.he.net/${ASN})
+
+⏰ Wartung: Sonntag 03:00 UTC
+📊 Logs: /var/log/globalping-install.log"
+
+    elif [[ "${level}" == "error" ]]; then
+        # Kompakte Fehler-Nachricht mit Links für Debug
+        local system_status error_context
+        
+        system_status=$(printf "RAM: %s | HDD: %s | Load: %s" \
+            "$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")" \
+            "$(df -h / 2>/dev/null | awk 'NR==2 {print $4" frei"}' || echo "?")" \
+            "$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "?")")
+        
+        # Letzte relevante Log-Einträge
+        error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -2 | sed 's/^.*] //' || echo "Keine Details verfügbar")
+        
+        # Kompakte Fehler-Nachricht mit integrierten Links
+        extended_message="${icon} ${emoji}
+
+🌍 SERVER: ${COUNTRY} | [${PUBLIC_IP}](https://ipinfo.io/${PUBLIC_IP})
+🏠 Host: ${HOSTNAME_NEW}
+🏢 [${PROVIDER}](https://ipinfo.io/${ASN}) ([${ASN}](https://bgp.he.net/${ASN}))
+
+🚨 FEHLER-DETAILS:
+${title}: ${message}
+
+💻 SYSTEM: ${system_status}
+
+📋 KONTEXT:
+${error_context}
+
+🔧 Zugang: \`ssh root@${PUBLIC_IP}\`
+📊 Logs: \`tail -50 /var/log/globalping-install.log\`"
+    fi
+    
+    log "Sende erweiterte Telegram-Nachricht mit Links (${#extended_message} Zeichen)..."
+    
+    # Debug: Zeige die ersten 200 Zeichen der Nachricht
+    log "DEBUG: Nachricht-Anfang: $(echo "${extended_message}" | head -c 200)..."
+    
+    # Telegram-Limit beachten
+    if [[ ${#extended_message} -gt 4000 ]]; then
+        log "Nachricht zu lang (${#extended_message} Zeichen), kürze auf 4000"
+        extended_message=$(echo "${extended_message}" | head -c 3900)
+        extended_message="${extended_message}
+
+...Nachricht gekürzt - Details via SSH"
+    fi
+    
+    # Sende mit Markdown-Parsing für klickbare Links
+    local result
+    result=$(curl -s -X POST \
+        --connect-timeout 10 \
+        --max-time 15 \
+        -d "chat_id=${TELEGRAM_CHAT}" \
+        -d "text=${extended_message}" \
+        -d "parse_mode=Markdown" \
+        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    
+    # Debug: Zeige curl-Ergebnis
+    log "DEBUG: Curl-Ergebnis: ${result}"
+    
+    if echo "${result}" | grep -q '"ok":true'; then
+        local message_id
+        message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
+        log "Erweiterte Telegram-Nachricht mit Links erfolgreich gesendet (ID: ${message_id})"
+        return 0
+    else
+        # Detailliertes Fehler-Logging
+        log "Telegram-API Fehler mit Markdown: ${result}"
+        
+        # Fallback: Ohne Markdown-Parsing
+        log "Sende Fallback ohne Markdown..."
+        local fallback_result
+        fallback_result=$(curl -s -X POST \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${extended_message}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+        
+        if echo "${fallback_result}" | grep -q '"ok":true'; then
+            log "Fallback-Nachricht ohne Markdown erfolgreich gesendet"
+            return 0
+        else
+            # Letzter Fallback: Sehr einfache Nachricht
+            log "Auch Markdown-Fallback fehlgeschlagen, sende einfache Nachricht..."
+            local simple_msg="${icon} ${emoji}
+🌍 ${COUNTRY} | ${PUBLIC_IP}
+🏠 ${HOSTNAME_NEW}
+📋 ${title}: ${message}
+🔗 https://ipinfo.io/${PUBLIC_IP}"
+            
+            curl -s -X POST \
+                -d "chat_id=${TELEGRAM_CHAT}" \
+                -d "text=${simple_msg}" \
+                "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" >/dev/null 2>&1
+            
+            log "Einfache Fallback-Nachricht gesendet"
+            return 1
+        fi
+    fi
 }
 
 # Test-Funktion für die erweiterte Benachrichtigung
