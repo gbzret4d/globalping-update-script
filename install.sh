@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.7.1"
+readonly SCRIPT_VERSION="2025.06.08-v1.8.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -2671,6 +2671,192 @@ create_temp_dir() {
     return 0
 }
 
+# =============================================
+# FEHLENDE ANALYSE-FUNKTIONEN (KORRIGIERT)
+# =============================================
+
+# Netzwerk-Analyse
+analyze_network_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Netzwerk-Grundlagen..."
+    
+    # IP-Adresse prüfen
+    if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
+        echo "Öffentliche IP: ${PUBLIC_IP}"
+        info_ref+=("Öffentliche IP: ${PUBLIC_IP}")
+    else
+        issues_ref+=("Keine öffentliche IP-Adresse ermittelbar")
+    fi
+    
+    # DNS-Auflösung testen
+    if ! nslookup google.com >/dev/null 2>&1; then
+        warnings_ref+=("DNS-Auflösung fehlgeschlagen")
+    else
+        info_ref+=("DNS-Auflösung funktioniert")
+    fi
+    
+    # Gateway-Erreichbarkeit
+    local gateway
+    gateway=$(ip route | grep default | awk '{print $3}' | head -1 2>/dev/null || echo "")
+    if [[ -n "${gateway}" ]]; then
+        if ping -c 1 -W 3 "${gateway}" >/dev/null 2>&1; then
+            info_ref+=("Gateway erreichbar: ${gateway}")
+        else
+            warnings_ref+=("Gateway nicht erreichbar: ${gateway}")
+        fi
+    fi
+}
+
+# Globalping-Analyse
+analyze_globalping_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Globalping-Status..."
+    
+    if [[ -z "${ADOPTION_TOKEN}" ]]; then
+        warnings_ref+=("Kein Adoption-Token konfiguriert")
+        return 0
+    fi
+    
+    if ! command -v docker >/dev/null 2>&1; then
+        issues_ref+=("Docker nicht verfügbar für Globalping")
+        return 0
+    fi
+    
+    local container_name="globalping-probe"
+    if docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
+        local status
+        status=$(docker inspect -f '{{.State.Status}}' "${container_name}" 2>/dev/null || echo "unknown")
+        if [[ "${status}" == "running" ]]; then
+            info_ref+=("Globalping-Container aktiv")
+            
+            # Restart-Policy prüfen
+            local restart_policy
+            restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "${container_name}" 2>/dev/null || echo "")
+            if [[ "${restart_policy}" == "always" ]]; then
+                info_ref+=("Restart-Policy korrekt: always")
+            else
+                warnings_ref+=("Restart-Policy nicht optimal: ${restart_policy}")
+            fi
+        else
+            warnings_ref+=("Globalping-Container nicht aktiv: ${status}")
+        fi
+    else
+        warnings_ref+=("Globalping-Container nicht gefunden")
+    fi
+}
+
+# Auto-Update-System-Analyse
+analyze_autoupdate_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Auto-Update-System..."
+    
+    # Systemd-Timer prüfen
+    if check_systemd_available; then
+        if systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
+            if systemctl is-active globalping-update.timer >/dev/null 2>&1; then
+                info_ref+=("Systemd-Timer aktiv und geplant")
+                
+                # Nächste Ausführung
+                local next_run
+                next_run=$(systemctl list-timers globalping-update.timer --no-pager 2>/dev/null | grep globalping | awk '{print $1" "$2}' || echo "unbekannt")
+                if [[ "${next_run}" != "unbekannt" ]]; then
+                    info_ref+=("Nächste Wartung: ${next_run}")
+                fi
+            else
+                warnings_ref+=("Systemd-Timer inaktiv")
+            fi
+        else
+            warnings_ref+=("Systemd-Timer nicht aktiviert")
+        fi
+    else
+        # Crontab prüfen
+        if check_crontab_available; then
+            if crontab -l 2>/dev/null | grep -q "install_globalping.*--auto-weekly"; then
+                info_ref+=("Crontab-Eintrag gefunden")
+            else
+                warnings_ref+=("Kein Auto-Update-Crontab gefunden")
+            fi
+        else
+            issues_ref+=("Weder systemd noch crontab verfügbar")
+        fi
+    fi
+    
+    # Skript-Installation prüfen
+    if [[ -f "${SCRIPT_PATH}" && -x "${SCRIPT_PATH}" ]]; then
+        info_ref+=("Auto-Update-Skript installiert")
+    else
+        warnings_ref+=("Auto-Update-Skript fehlt oder nicht ausführbar")
+    fi
+}
+
+# Sicherheits-Analyse
+analyze_security_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Sicherheits-Konfiguration..."
+    
+    # SSH-Konfiguration
+    if [[ -f "${SSH_DIR}/authorized_keys" ]]; then
+        local key_count
+        key_count=$(wc -l < "${SSH_DIR}/authorized_keys" 2>/dev/null || echo "0")
+        if [[ ${key_count} -gt 0 ]]; then
+            info_ref+=("SSH-Schlüssel konfiguriert (${key_count})")
+        else
+            warnings_ref+=("SSH authorized_keys leer")
+        fi
+    else
+        warnings_ref+=("Keine SSH-Schlüssel konfiguriert")
+    fi
+    
+    # Firewall-Status
+    if command -v ufw >/dev/null 2>&1; then
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "unknown")
+        if [[ "${ufw_status}" == "active" ]]; then
+            info_ref+=("UFW Firewall aktiv")
+        else
+            warnings_ref+=("UFW Firewall nicht aktiv")
+        fi
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        if systemctl is-active firewalld >/dev/null 2>&1; then
+            info_ref+=("Firewalld aktiv")
+        else
+            warnings_ref+=("Firewalld nicht aktiv")
+        fi
+    fi
+    
+    # Root-Login-Status
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        local permit_root
+        permit_root=$(grep "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "yes")
+        if [[ "${permit_root}" == "no" ]]; then
+            info_ref+=("Root-SSH deaktiviert")
+        else
+            warnings_ref+=("Root-SSH erlaubt: ${permit_root}")
+        fi
+    fi
+    
+    # Automatische Updates
+    if [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
+        info_ref+=("Automatische Security-Updates konfiguriert")
+    elif [[ -f /etc/dnf/automatic.conf ]]; then
+        info_ref+=("DNF automatische Updates konfiguriert")
+    else
+        warnings_ref+=("Keine automatischen Security-Updates konfiguriert")
+    fi
+}
+
 # Erweiterte Diagnostik-Funktionen
 run_enhanced_diagnostics() {
     log "Führe erweiterte Systemdiagnose durch"
@@ -2686,37 +2872,37 @@ run_enhanced_diagnostics() {
     echo "=================================="
     
     # 1. HARDWARE-ANALYSE
-    echo -e "\n[DIAGNOSE] Hardware-Analyse"
+    echo -e "\nAnalysiere Hardware..."
     analyze_hardware_enhanced issues warnings info_items
     
     # 2. SPEICHER-ANALYSE
-    echo -e "\n[DIAGNOSE] Speicher-Analyse (erweitert)"
+    echo -e "\nAnalysiere Speicher (erweitert)..."
     analyze_memory_enhanced issues warnings info_items
     
     # 3. NETZWERK-GRUNDPRÜFUNG
-    echo -e "\n[DIAGNOSE] Netzwerk-Analyse"
+    echo -e "\nAnalysiere Netzwerk..."
     analyze_network_enhanced issues warnings info_items
     
     # 4. DOCKER-SYSTEM
     if command -v docker >/dev/null 2>&1; then
-        echo -e "\n[DIAGNOSE] Docker-System"
+        echo -e "\nAnalysiere Docker-System (erweitert)..."
         analyze_docker_enhanced issues warnings info_items
     fi
     
     # 5. GLOBALPING-PROBE
-    echo -e "\n[DIAGNOSE] Globalping-Probe"
+    echo -e "\nAnalysiere Globalping-Probe..."
     analyze_globalping_enhanced issues warnings info_items
     
     # 6. AUTO-UPDATE-SYSTEM
-    echo -e "\n[DIAGNOSE] Auto-Update-System"
+    echo -e "\nAnalysiere Auto-Update-System..."
     analyze_autoupdate_enhanced issues warnings info_items
     
     # 7. SICHERHEIT
-    echo -e "\n[DIAGNOSE] Sicherheits-Konfiguration"
+    echo -e "\nAnalysiere Sicherheits-Konfiguration..."
     analyze_security_enhanced issues warnings info_items
     
     # 8. PERFORMANCE
-    echo -e "\n[DIAGNOSE] Performance-Analyse"
+    echo -e "\nAnalysiere System-Performance..."
     analyze_performance_enhanced issues warnings info_items
     
     # ERGEBNISSE
@@ -3430,7 +3616,7 @@ enhanced_main() {
     
     enhanced_log "INFO" "=== STARTE ERWEITERTES SERVER-SETUP ==="
     enhanced_log "INFO" "Version: ${SCRIPT_VERSION}"
-    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:-Normal}"  # KORRIGIERT
+    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:-false}"  # KORRIGIERT
     enhanced_log "INFO" "Startzeit: $(date)"
     enhanced_log "INFO" "========================================="
     
