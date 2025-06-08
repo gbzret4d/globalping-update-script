@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.0.5"
+readonly SCRIPT_VERSION="2025.06.08-v1.0.6"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -90,7 +90,7 @@ get_enhanced_system_info() {
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
 }
 
-# EINFACHE Telegram-Benachrichtigung (die garantiert funktioniert)
+# ERWEITERTE Telegram-Benachrichtigung mit allen Details
 enhanced_notify() {
     local level="$1"
     local title="$2"
@@ -106,37 +106,156 @@ enhanced_notify() {
         return 0
     fi
     
-    # Sammle Info
+    # Sammle aktuelle Systeminfo falls nicht vorhanden
     [[ -z "${COUNTRY}" ]] && get_enhanced_system_info
     
-    local icon
+    local icon emoji
     case "${level}" in
-        "error") icon="❌" ;;
-        "install_success") icon="✅" ;;
+        "error")
+            icon="❌"
+            emoji="KRITISCHER FEHLER"
+            ;;
+        "install_success")
+            icon="✅"
+            emoji="INSTALLATION ERFOLGREICH"
+            ;;
     esac
     
-    # SEHR EINFACHE Nachricht
-    local simple_msg="${icon} ${title}
-Country: ${COUNTRY}
-IP: ${PUBLIC_IP}
-${message}"
+    # Erstelle erweiterte Nachricht basierend auf Level
+    local extended_message
+    if [[ "${level}" == "install_success" ]]; then
+        # Sammle zusätzliche Informationen für Success-Nachricht
+        local ram_info disk_info docker_info
+        ram_info=$(free -h | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
+        disk_info=$(df -h / | awk 'NR==2 {print $3"/"$2" ("$5" belegt)"}' || echo "unbekannt")
+        docker_info=$(docker ps --format "{{.Names}}" | grep globalping | head -1 || echo "nicht gefunden")
+        
+        # Erweiterte Success-Nachricht
+        extended_message="${icon} ${emoji}
+
+🌍 SERVER-DETAILS:
+├─ Land: ${COUNTRY}
+├─ Hostname: ${HOSTNAME_NEW}
+├─ IP-Adresse: ${PUBLIC_IP}
+├─ Provider: ${PROVIDER}
+├─ ASN: ${ASN}
+└─ Virtualisierung: $(systemd-detect-virt 2>/dev/null || echo "Unbekannt")
+
+💾 SYSTEM-STATUS:
+├─ RAM: ${ram_info}
+├─ Festplatte: ${disk_info}
+├─ Swap: $(free -h | grep Swap | awk '{print $2}' || echo "0B")
+└─ Load: $(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
+
+🐳 DOCKER & GLOBALPING:
+├─ Container: ${docker_info}
+├─ Status: $(docker inspect -f '{{.State.Status}}' globalping-probe 2>/dev/null || echo "unbekannt")
+├─ Restart-Policy: $(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' globalping-probe 2>/dev/null || echo "unbekannt")
+└─ Image: $(docker inspect -f '{{.Config.Image}}' globalping-probe 2>/dev/null | cut -d':' -f2 || echo "unbekannt")
+
+⚙️ KONFIGURATION:
+├─ Auto-Update: $(systemctl is-enabled globalping-update.timer 2>/dev/null || echo "crontab")
+├─ SSH-Schlüssel: ${SSH_KEY:+✓ Konfiguriert}${SSH_KEY:-✗ Nicht gesetzt}
+├─ Ubuntu Pro: ${UBUNTU_PRO_TOKEN:+✓ Aktiviert}${UBUNTU_PRO_TOKEN:-✗ Nicht verwendet}
+└─ Telegram: ✓ Aktiv
+
+📋 ${title}:
+${message}
+
+🔧 Automatische Wartung: Jeden Sonntag 03:00 UTC
+📊 Logs: /var/log/globalping-install.log"
+
+    elif [[ "${level}" == "error" ]]; then
+        # Sammle erweiterte Debug-Informationen für Fehler
+        local debug_info error_context system_status
+        
+        # System-Status zum Fehler-Zeitpunkt
+        system_status="RAM: $(free -h | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
+Festplatte: $(df -h / | awk 'NR==2 {print $4" frei"}' || echo "unbekannt")
+Load: $(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "unbekannt")
+Prozesse: $(ps aux | wc -l || echo "unbekannt")"
+
+        # Letzte Log-Einträge (ohne Emojis für bessere Lesbarkeit)
+        error_context=$(tail -5 "${LOG_FILE}" 2>/dev/null | grep -v "INFO\|DEBUG" | tail -3 || echo "Keine Logs verfügbar")
+
+        # Docker-Status falls relevant
+        local docker_status=""
+        if command -v docker >/dev/null 2>&1; then
+            docker_status="
+Docker: $(systemctl is-active docker 2>/dev/null || echo "inaktiv")
+Container: $(docker ps --format "{{.Names}}" | grep globalping | head -1 || echo "nicht gefunden")"
+        fi
+
+        # Fehler-Nachricht
+        extended_message="${icon} ${emoji}
+
+🌍 SERVER-DETAILS:
+├─ Land: ${COUNTRY}
+├─ Hostname: ${HOSTNAME_NEW}  
+├─ IP-Adresse: ${PUBLIC_IP}
+├─ Provider: ${PROVIDER}
+└─ ASN: ${ASN}
+
+🚨 FEHLER-DETAILS:
+${title}: ${message}
+
+💻 SYSTEM-STATUS:
+${system_status}${docker_status}
+
+📋 LETZTE LOG-EINTRÄGE:
+${error_context}
+
+🔧 Manuelle Prüfung erforderlich!
+📊 Vollständige Logs: /var/log/globalping-install.log"
+    fi
     
-    log "Sende Telegram-Nachricht..."
+    log "Sende erweiterte Telegram-Nachricht (${#extended_message} Zeichen)..."
     
-    # Verwende EXAKT die gleiche Methode wie dein erfolgreicher Test
+    # Sende mit bewährter Methode (maximal 4096 Zeichen für Telegram)
+    if [[ ${#extended_message} -gt 4000 ]]; then
+        extended_message=$(echo "${extended_message}" | head -c 4000)
+        extended_message="${extended_message}
+
+...Nachricht gekürzt. Vollständige Logs auf Server verfügbar."
+    fi
+    
     local result
     result=$(curl -s -X POST \
         -d "chat_id=${TELEGRAM_CHAT}" \
-        -d "text=${simple_msg}" \
+        -d "text=${extended_message}" \
         "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>/dev/null)
     
     if echo "${result}" | grep -q '"ok":true'; then
-        log "Telegram-Nachricht erfolgreich gesendet"
+        local message_id
+        message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
+        log "Erweiterte Telegram-Nachricht erfolgreich gesendet (ID: ${message_id})"
         return 0
     else
-        log "Telegram-Nachricht fehlgeschlagen: ${result}"
+        # Fallback: Sende vereinfachte Nachricht bei Fehlern
+        log "Erweiterte Nachricht fehlgeschlagen, sende Fallback..."
+        local fallback_msg="${icon} ${emoji}
+Server: ${COUNTRY} | ${PUBLIC_IP}
+${title}: ${message}"
+        
+        curl -s -X POST \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${fallback_msg}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" >/dev/null 2>&1
+        
+        log "Fallback-Nachricht gesendet"
         return 1
     fi
+}
+
+# Test-Funktion für die erweiterte Benachrichtigung
+test_extended_telegram() {
+    log "Teste erweiterte Telegram-Benachrichtigung..."
+    
+    # Sammle Systeminfo
+    get_enhanced_system_info
+    
+    # Teste Success-Nachricht
+    enhanced_notify "install_success" "Test-Installation" "Dies ist eine Test-Nachricht mit allen Details des Servers."
 }
 
 # Verbesserter Error-Handler
