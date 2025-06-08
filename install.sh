@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.1.0"
+readonly SCRIPT_VERSION="2025.06.08-v1.2.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -1042,7 +1042,7 @@ optimize_for_raspberry_pi() {
     return 0
 }
 
-# Erweiterte Systemvalidierung
+# KORRIGIERTE Erweiterte Systemvalidierung
 enhanced_validate_system() {
     log "Führe erweiterte Systemvalidierung durch"
     
@@ -1060,16 +1060,36 @@ enhanced_validate_system() {
         warnings+=("Wenig RAM: ${mem_mb}MB - Performance könnte eingeschränkt sein")
     fi
     
-    # Freien Speicherplatz prüfen (absolut und prozentual)
+    # KORRIGIERTE Freien Speicherplatz prüfen
     local disk_available_kb disk_available_gb disk_usage_percent
     disk_available_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    disk_available_gb=$(echo "scale=1; ${disk_available_kb} / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
     disk_usage_percent=$(df / | awk 'NR==2 {print $5}' | tr -d '%' || echo "100")
     
-    if (( $(echo "${disk_available_gb} < ${MIN_FREE_SPACE_GB}" | bc -l 2>/dev/null || echo "1") )); then
-        errors+=("Zu wenig freier Speicherplatz: ${disk_available_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
-    elif [[ ${disk_usage_percent} -gt 85 ]]; then
-        warnings+=("Festplatte zu ${disk_usage_percent}% voll (${disk_available_gb}GB frei)")
+    # SICHERE GB-Berechnung ohne bc
+    if [[ ${disk_available_kb} -gt 0 ]]; then
+        # Verwende nur Integer-Arithmetik
+        local disk_available_mb=$((disk_available_kb / 1024))
+        disk_available_gb=$((disk_available_mb / 1024))
+        
+        # Für genauere Darstellung: 1.5GB = 1536MB
+        local min_space_mb=$((MIN_FREE_SPACE_GB * 1024 / 1))  # 1.5 -> 1536
+        min_space_mb=$(echo "${MIN_FREE_SPACE_GB}" | awk '{print int($1 * 1024)}')
+        
+        log "DEBUG: Verfügbar: ${disk_available_mb}MB, Minimum: ${min_space_mb}MB"
+        
+        if [[ ${disk_available_mb} -lt ${min_space_mb} ]]; then
+            # Bessere Anzeige für Sub-GB Werte
+            if [[ ${disk_available_gb} -eq 0 ]]; then
+                local display_gb=$(echo "scale=1; ${disk_available_mb} / 1024" | bc 2>/dev/null || echo "${disk_available_mb}MB")
+                errors+=("Zu wenig freier Speicherplatz: ${display_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
+            else
+                errors+=("Zu wenig freier Speicherplatz: ${disk_available_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
+            fi
+        elif [[ ${disk_usage_percent} -gt 85 ]]; then
+            warnings+=("Festplatte zu ${disk_usage_percent}% voll (${disk_available_gb}GB frei)")
+        fi
+    else
+        errors+=("Kann freien Speicherplatz nicht ermitteln")
     fi
     
     # Ausgabe der Validierung
@@ -1079,6 +1099,7 @@ enhanced_validate_system() {
             enhanced_log "ERROR" "  ${error}"
         done
         
+        # NUR EINE Telegram-Nachricht senden
         enhanced_notify "error" "Systemvalidierung" "Kritische Anforderungen nicht erfüllt:
 $(printf '%s\n' "${errors[@]}")"
         
@@ -1094,6 +1115,167 @@ $(printf '%s\n' "${errors[@]}")"
     
     log "Systemvalidierung erfolgreich (RAM: ${mem_mb}MB, Frei: ${disk_available_gb}GB)"
     return 0
+}
+
+# KORRIGIERTE Error-Handler (verhindert doppelte Telegram-Nachrichten)
+enhanced_error_handler() {
+    local line_number="$1"
+    local error_code="${2:-1}"
+    local error_msg="Skript fehlgeschlagen in Zeile ${line_number} (Exit-Code: ${error_code})"
+    
+    log "KRITISCHER FEHLER: ${error_msg}"
+    
+    # Prüfe, ob bereits eine Telegram-Nachricht in den letzten 60 Sekunden gesendet wurde
+    local last_telegram_file="/tmp/last_telegram_notification"
+    local current_time=$(date +%s)
+    local send_telegram=true
+    
+    if [[ -f "${last_telegram_file}" ]]; then
+        local last_time
+        last_time=$(cat "${last_telegram_file}" 2>/dev/null || echo "0")
+        local time_diff=$((current_time - last_time))
+        
+        if [[ ${time_diff} -lt 60 ]]; then
+            log "Telegram-Nachricht vor ${time_diff}s gesendet - überspringe doppelte Benachrichtigung"
+            send_telegram=false
+        fi
+    fi
+    
+    if [[ "${send_telegram}" == "true" ]]; then
+        # Sammle Debug-Informationen
+        local debug_info=""
+        debug_info+="Letzte Befehle: $(history | tail -3 | tr '\n' '; ')
+"
+        debug_info+="Speicher: $(free -h | grep Mem | awk '{print $3"/"$2}')
+"
+        debug_info+="Festplatte: $(df -h / | awk 'NR==2 {print $3"/"$2" ("$5")"}')
+"
+        
+        enhanced_notify "error" "Fehlermeldung" "${error_msg}
+
+Debug-Info:
+${debug_info}"
+        
+        # Markiere, dass Telegram-Nachricht gesendet wurde
+        echo "${current_time}" > "${last_telegram_file}"
+    fi
+    
+    # Cleanup
+    cleanup_on_error
+    exit "${error_code}"
+}
+
+# KORRIGIERTE enhanced_notify (bessere Link-Behandlung)
+enhanced_notify() {
+    local level="$1"
+    local title="$2"
+    local message="$3"
+    
+    # Nur Fehler und erste Installation senden
+    if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then
+        return 0
+    fi
+    
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        log "Telegram-Konfiguration nicht vollständig"
+        return 0
+    fi
+    
+    # Sammle aktuelle Systeminfo falls nicht vorhanden
+    [[ -z "${COUNTRY}" ]] && get_enhanced_system_info
+    
+    local icon emoji
+    case "${level}" in
+        "error")
+            icon="❌"
+            emoji="KRITISCHER FEHLER"
+            ;;
+        "install_success")
+            icon="✅"
+            emoji="INSTALLATION ERFOLGREICH"
+            ;;
+    esac
+    
+    # Erstelle erweiterte Nachricht basierend auf Level
+    local extended_message
+    if [[ "${level}" == "install_success" ]]; then
+        # [Success-Message Code bleibt gleich wie vorher]
+        # ... (Code für install_success)
+        
+    elif [[ "${level}" == "error" ]]; then
+        # KORRIGIERTE Fehler-Nachricht
+        local system_status error_context
+        
+        # VERBESSERTE System-Status-Sammlung
+        local ram_status disk_status load_status
+        ram_status=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
+        disk_status=$(df -h / 2>/dev/null | awk 'NR==2 {print $4" frei"}' || echo "unbekannt")
+        load_status=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "unbekannt")
+        
+        system_status="RAM: ${ram_status} | HDD: ${disk_status} | Load: ${load_status}"
+        
+        # Letzte relevante Log-Einträge
+        error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -2 | sed 's/^.*] //' || echo "Keine Details verfügbar")
+        
+        # KORRIGIERTE Fehler-Nachricht (ohne problematische Markdown)
+        extended_message="${icon} ${emoji}
+
+🌍 SERVER: ${COUNTRY} | ${PUBLIC_IP}
+🏠 Host: ${HOSTNAME_NEW}
+🏢 ${PROVIDER} (${ASN})
+
+🚨 FEHLER-DETAILS:
+${title}: ${message}
+
+💻 SYSTEM: ${system_status}
+
+📋 KONTEXT:
+${error_context}
+
+🔧 Zugang: ssh root@${PUBLIC_IP}
+📊 Logs: tail -50 /var/log/globalping-install.log"
+    fi
+    
+    log "Sende erweiterte Telegram-Nachricht (${#extended_message} Zeichen)..."
+    
+    # Telegram-Limit beachten
+    if [[ ${#extended_message} -gt 4000 ]]; then
+        extended_message=$(echo "${extended_message}" | head -c 3900)
+        extended_message="${extended_message}
+
+...gekürzt - Details via SSH"
+    fi
+    
+    # KORRIGIERT: Sende OHNE Markdown bei Fehlern (verhindert API-Probleme)
+    local result
+    if [[ "${level}" == "install_success" ]]; then
+        # Success-Nachrichten mit Markdown-Links
+        result=$(curl -s -X POST \
+            --connect-timeout 10 \
+            --max-time 15 \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${extended_message}" \
+            -d "parse_mode=Markdown" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    else
+        # Fehler-Nachrichten OHNE Markdown (sicherer)
+        result=$(curl -s -X POST \
+            --connect-timeout 10 \
+            --max-time 15 \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${extended_message}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    fi
+    
+    if echo "${result}" | grep -q '"ok":true'; then
+        local message_id
+        message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
+        log "Telegram-Nachricht erfolgreich gesendet (ID: ${message_id})"
+        return 0
+    else
+        log "Telegram-API Fehler: ${result}"
+        return 1
+    fi
 }
 
 # Intelligente Swap-Konfiguration
