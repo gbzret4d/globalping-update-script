@@ -17,7 +17,7 @@ readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
 readonly SCRIPT_VERSION="2025.06.08-v1.9.0"
 
 # Erweiterte Konfiguration
-readonly MIN_FREE_SPACE_GB="0.9"  # Mindestens 1.5GB frei
+readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
 readonly MIN_RAM_MB="256"          # Mindestens 256MB RAM
 readonly MAX_LOG_SIZE_MB="50"      # Maximale Log-Größe
 readonly SWAP_MIN_TOTAL_GB="1"     # RAM + SWAP mindestens 1GB
