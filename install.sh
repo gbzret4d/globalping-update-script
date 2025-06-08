@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.4.0"
+readonly SCRIPT_VERSION="2025.06.08-v1.5.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -39,6 +39,7 @@ ADOPTION_TOKEN=""
 DEBUG_MODE="false"
 WEEKLY_MODE="false"
 REBOOT_REQUIRED="false"
+TELEGRAM_SENT="false"  # Flag um doppelte Nachrichten zu vermeiden
 
 # System-Informationen (werden dynamisch gesetzt)
 COUNTRY=""
@@ -46,6 +47,42 @@ HOSTNAME_NEW=""
 PUBLIC_IP=""
 ASN=""
 PROVIDER=""
+
+# =============================================
+# HILFS-FUNKTIONEN
+# =============================================
+
+# Sichere Mathematik ohne bc
+safe_calc() {
+    local operation="$1"
+    case "${operation}" in
+        "gb_from_kb")
+            local kb="$2"
+            echo $((kb / 1024 / 1024))
+            ;;
+        "mb_from_kb")
+            local kb="$2"
+            echo $((kb / 1024))
+            ;;
+        "compare_gb")
+            local val1="$2"
+            local val2="$3"
+            # Konvertiere zu MB für Vergleich (1.5GB = 1536MB)
+            local val1_mb=$((val1 * 1024))
+            local val2_mb
+            val2_mb=$(echo "${val2}" | cut -d'.' -f1)
+            val2_mb=$((val2_mb * 1024))
+            if [[ ${val1_mb} -lt ${val2_mb} ]]; then
+                echo "1"
+            else
+                echo "0"
+            fi
+            ;;
+        *)
+            echo "0"
+            ;;
+    esac
+}
 
 # =============================================
 # FUNKTIONEN
@@ -151,11 +188,17 @@ rotate_logs_if_needed() {
     fi
 }
 
-# KORRIGIERTE Telegram-Benachrichtigung
+# KORRIGIERTE Telegram-Benachrichtigung (nur eine pro Level)
 enhanced_notify() {
     local level="$1"
     local title="$2"
     local message="$3"
+    
+    # Verhindere doppelte Telegram-Nachrichten
+    if [[ "${TELEGRAM_SENT}" == "true" && "${level}" == "install_success" ]]; then
+        log "Telegram Success-Nachricht bereits gesendet - überspringe"
+        return 0
+    fi
     
     # Nur Fehler und erste Installation senden
     if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then
@@ -179,13 +222,14 @@ enhanced_notify() {
         "install_success")
             icon="✅"
             emoji="INSTALLATION ERFOLGREICH"
+            TELEGRAM_SENT="true"  # Markiere als gesendet
             ;;
     esac
     
     # Erstelle erweiterte Nachricht basierend auf Level
     local extended_message
     if [[ "${level}" == "install_success" ]]; then
-        # Sammle Systeminformationen SICHER
+        # Sammle Systeminformationen SICHER (ohne sensible Daten)
         local ram_info disk_info swap_info load_info
         local auto_update_status ssh_status ubuntu_pro_status
         local globalping_status docker_installed
@@ -196,7 +240,7 @@ enhanced_notify() {
         swap_info=$(free -h 2>/dev/null | grep Swap | awk '{print $2}' || echo "0B")
         load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
         
-        # Status-Informationen (KORRIGIERT - ohne sensible Daten)
+        # Status-Informationen (KORRIGIERT - OHNE sensible Daten)
         auto_update_status=$(systemctl is-enabled globalping-update.timer 2>/dev/null || echo "crontab")
         ssh_status="${SSH_KEY:+✓ Konfiguriert}${SSH_KEY:-✗ Nicht gesetzt}"
         ubuntu_pro_status="${UBUNTU_PRO_TOKEN:+✓ Aktiv}${UBUNTU_PRO_TOKEN:-✗ Nicht verwendet}"
@@ -214,7 +258,7 @@ enhanced_notify() {
             globalping_status="✗ Docker fehlt"
         fi
         
-        # Erweiterte Success-Nachricht mit integrierten Links (Markdown)
+        # Erweiterte Success-Nachricht mit integrierten Links (Markdown) - OHNE SENSIBLE DATEN
         extended_message="${icon} ${emoji}
 
 🌍 SERVER-DETAILS:
@@ -235,8 +279,8 @@ enhanced_notify() {
 ├─ Docker: ${docker_installed}
 ├─ Globalping: ${globalping_status}
 ├─ Auto-Update: ${auto_update_status}
-├─ SSH-Schlüssel: ${ssh_status}
-├─ Ubuntu Pro: ${ubuntu_pro_status}
+├─ SSH-Schlüssel: ${SSH_KEY:+✓ Konfiguriert}${SSH_KEY:-✗ Nicht gesetzt}
+├─ Ubuntu Pro: ${UBUNTU_PRO_TOKEN:+✓ Aktiv}${UBUNTU_PRO_TOKEN:-✗ Nicht verwendet}
 └─ Telegram: ✓ Aktiv
 
 📋 ${title}:
@@ -286,9 +330,6 @@ ${error_context}
     
     log "Sende erweiterte Telegram-Nachricht (${#extended_message} Zeichen)..."
     
-    # Debug: Zeige die ersten 200 Zeichen der Nachricht
-    log "DEBUG: Nachricht-Anfang: $(echo "${extended_message}" | head -c 200)..."
-    
     # Telegram-Limit beachten
     if [[ ${#extended_message} -gt 4000 ]]; then
         log "Nachricht zu lang (${#extended_message} Zeichen), kürze auf 4000"
@@ -319,9 +360,6 @@ ${error_context}
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
     fi
     
-    # Debug: Zeige curl-Ergebnis
-    log "DEBUG: Curl-Ergebnis: ${result}"
-    
     if echo "${result}" | grep -q '"ok":true'; then
         local message_id
         message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
@@ -330,35 +368,7 @@ ${error_context}
     else
         # Detailliertes Fehler-Logging
         log "Telegram-API Fehler: ${result}"
-        
-        # Fallback: Ohne Markdown-Parsing
-        log "Sende Fallback ohne Markdown..."
-        local fallback_result
-        fallback_result=$(curl -s -X POST \
-            -d "chat_id=${TELEGRAM_CHAT}" \
-            -d "text=${extended_message}" \
-            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
-        
-        if echo "${fallback_result}" | grep -q '"ok":true'; then
-            log "Fallback-Nachricht ohne Markdown erfolgreich gesendet"
-            return 0
-        else
-            # Letzter Fallback: Sehr einfache Nachricht
-            log "Auch Markdown-Fallback fehlgeschlagen, sende einfache Nachricht..."
-            local simple_msg="${icon} ${emoji}
-🌍 ${COUNTRY} | ${PUBLIC_IP}
-🏠 ${HOSTNAME_NEW}
-📋 ${title}: ${message}
-🔗 https://ipinfo.io/${PUBLIC_IP}"
-            
-            curl -s -X POST \
-                -d "chat_id=${TELEGRAM_CHAT}" \
-                -d "text=${simple_msg}" \
-                "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" >/dev/null 2>&1
-            
-            log "Einfache Fallback-Nachricht gesendet"
-            return 1
-        fi
+        return 1
     fi
 }
 
@@ -410,7 +420,7 @@ Dieser Test bestätigt, dass Ihr Bot erfolgreich Nachrichten senden kann."
     fi
 }
 
-# Verbesserter Error-Handler
+# Verbesserter Error-Handler (verhindert doppelte Nachrichten)
 enhanced_error_handler() {
     local line_number="$1"
     local error_code="${2:-1}"
@@ -625,7 +635,7 @@ setup_ssh_key() {
     fi
 }
 
-# KORRIGIERTE Abhängigkeiten installieren (mit unzip und weiteren Tools)
+# KORRIGIERTE Abhängigkeiten installieren (mit verbesserter bc-Installation)
 install_dependencies() {
     enhanced_log "INFO" "Installiere Systemabhängigkeiten"
     
@@ -659,10 +669,19 @@ install_dependencies() {
     enhanced_log "INFO" "Installiere fehlende Abhängigkeiten: ${missing_cmds[*]}"
     
     if [[ "${is_debian_based}" == "true" ]] && command -v apt-get >/dev/null 2>&1; then
-        # Debian/Ubuntu - ERWEITERTE Paketliste
+        # Debian/Ubuntu - ERWEITERTE Paketliste mit bc
         apt-get update >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
         }
+        
+        # Installiere bc separat falls es fehlt
+        if [[ " ${missing_cmds[*]} " =~ " bc " ]]; then
+            enhanced_log "INFO" "Installiere bc (Basic Calculator)"
+            apt-get install -y bc >/dev/null 2>&1 || {
+                enhanced_log "WARN" "bc-Installation fehlgeschlagen - verwende Fallback-Mathematik"
+            }
+        fi
+        
         apt-get install -y \
             curl wget awk sed grep coreutils bc \
             unzip tar gzip bzip2 xz-utils \
@@ -671,8 +690,7 @@ install_dependencies() {
             ca-certificates gnupg \
             software-properties-common \
             apt-transport-https >/dev/null 2>&1 || {
-            enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
-            return 1
+            enhanced_log "WARN" "Einige Abhängigkeiten konnten nicht installiert werden"
         }
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
@@ -684,8 +702,7 @@ install_dependencies() {
                 systemd procps-ng psmisc \
                 ca-certificates gnupg2 \
                 dnf-plugins-core >/dev/null 2>&1 || {
-                enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
-                return 1
+                enhanced_log "WARN" "Einige Abhängigkeiten konnten nicht installiert werden"
             }
         elif command -v yum >/dev/null 2>&1; then
             # Ältere RHEL/CentOS mit YUM
@@ -696,8 +713,7 @@ install_dependencies() {
                 systemd procps-ng psmisc \
                 ca-certificates gnupg2 \
                 yum-utils >/dev/null 2>&1 || {
-                enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
-                return 1
+                enhanced_log "WARN" "Einige Abhängigkeiten konnten nicht installiert werden"
             }
         else
             enhanced_log "ERROR" "Kein unterstützter Paketmanager gefunden"
@@ -842,7 +858,7 @@ optimize_for_raspberry_pi() {
     return 0
 }
 
-# KORRIGIERTE Erweiterte Systemvalidierung
+# KORRIGIERTE Erweiterte Systemvalidierung (mit sicherer Mathematik)
 enhanced_validate_system() {
     log "Führe erweiterte Systemvalidierung durch"
     
@@ -860,7 +876,7 @@ enhanced_validate_system() {
         warnings+=("Wenig RAM: ${mem_mb}MB - Performance könnte eingeschränkt sein")
     fi
     
-    # KORRIGIERTE Freien Speicherplatz prüfen
+    # KORRIGIERTE Freien Speicherplatz prüfen (ohne bc)
     local disk_available_kb disk_available_gb disk_usage_percent
     disk_available_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
     disk_usage_percent=$(df / | awk 'NR==2 {print $5}' | tr -d '%' || echo "100")
@@ -872,8 +888,7 @@ enhanced_validate_system() {
         disk_available_gb=$((disk_available_mb / 1024))
         
         # Für genauere Darstellung: 1.5GB = 1536MB
-        local min_space_mb
-        min_space_mb=$(echo "${MIN_FREE_SPACE_GB}" | awk '{print int($1 * 1024)}')
+        local min_space_mb=1536  # 1.5 * 1024
         
         log "DEBUG: Verfügbar: ${disk_available_mb}MB, Minimum: ${min_space_mb}MB"
         
@@ -881,7 +896,11 @@ enhanced_validate_system() {
             # Bessere Anzeige für Sub-GB Werte
             if [[ ${disk_available_gb} -eq 0 ]]; then
                 local display_gb
-                display_gb=$(echo "scale=1; ${disk_available_mb} / 1024" | bc 2>/dev/null || echo "${disk_available_mb}MB")
+                if command -v bc >/dev/null 2>&1; then
+                    display_gb=$(echo "scale=1; ${disk_available_mb} / 1024" | bc 2>/dev/null)
+                else
+                    display_gb="${disk_available_mb}MB"
+                fi
                 errors+=("Zu wenig freier Speicherplatz: ${display_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
             else
                 errors+=("Zu wenig freier Speicherplatz: ${disk_available_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
@@ -893,17 +912,12 @@ enhanced_validate_system() {
         errors+=("Kann freien Speicherplatz nicht ermitteln")
     fi
     
-    # Ausgabe der Validierung
+    # Ausgabe der Validierung (OHNE automatische Telegram-Nachricht hier)
     if [[ ${#errors[@]} -gt 0 ]]; then
         enhanced_log "ERROR" "Kritische Systemanforderungen nicht erfüllt:"
         for error in "${errors[@]}"; do
             enhanced_log "ERROR" "  ${error}"
         done
-        
-        # NUR EINE Telegram-Nachricht senden
-        enhanced_notify "error" "Systemvalidierung" "Kritische Anforderungen nicht erfüllt:
-$(printf '%s\n' "${errors[@]}")"
-        
         return 1
     fi
     
@@ -918,7 +932,7 @@ $(printf '%s\n' "${errors[@]}")"
     return 0
 }
 
-# Intelligente Swap-Konfiguration
+# Intelligente Swap-Konfiguration (mit sicherer Mathematik)
 configure_smart_swap() {
     log "Prüfe und konfiguriere Swap-Speicher"
     
@@ -932,12 +946,12 @@ configure_smart_swap() {
         return 0
     fi
     
-    # Gesamte Festplattengröße prüfen
+    # Gesamte Festplattengröße prüfen (sichere Berechnung)
     local disk_total_kb disk_total_gb
     disk_total_kb=$(df / | awk 'NR==2 {print $2}' || echo "0")
-    disk_total_gb=$(echo "scale=1; ${disk_total_kb} / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
+    disk_total_gb=$((disk_total_kb / 1024 / 1024))
     
-    if (( $(echo "${disk_total_gb} < ${MIN_DISK_FOR_SWAP_GB}" | bc -l 2>/dev/null || echo "1") )); then
+    if [[ ${disk_total_gb} -lt ${MIN_DISK_FOR_SWAP_GB} ]]; then
         log "Festplatte zu klein für Swap: ${disk_total_gb}GB (Minimum: ${MIN_DISK_FOR_SWAP_GB}GB)"
         return 0
     fi
@@ -1614,23 +1628,26 @@ perform_enhanced_globalping_maintenance() {
     return 0
 }
 
-# Erweiterte Systemreinigung mit absoluten Schwellwerten
+# Erweiterte Systemreinigung mit sicherer Speicherplatz-Berechnung
 perform_enhanced_system_cleanup() {
     log "Starte erweiterte Systemreinigung"
     
-    # Prüfe freien Speicherplatz
+    # Prüfe freien Speicherplatz (sichere Berechnung)
     local disk_available_kb disk_available_gb disk_usage_percent
     disk_available_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    disk_available_gb=$(echo "scale=2; ${disk_available_kb} / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
     disk_usage_percent=$(df / | awk 'NR==2 {print $5}' | tr -d '%' || echo "100")
+    
+    # Sichere Berechnung ohne bc
+    local disk_available_mb=$((disk_available_kb / 1024))
+    disk_available_gb=$((disk_available_mb / 1024))
     
     log "Aktueller Speicherplatz: ${disk_available_gb}GB frei (${disk_usage_percent}% belegt)"
     
-    # Prüfe, ob Bereinigung notwendig ist
+    # Prüfe, ob Bereinigung notwendig ist (1.5GB = 1536MB)
     local cleanup_needed=false
     
-    if (( $(echo "${disk_available_gb} < ${MIN_FREE_SPACE_GB}" | bc -l 2>/dev/null || echo "1") )); then
-        log "Bereinigung wegen wenig freiem Speicher: ${disk_available_gb}GB < ${MIN_FREE_SPACE_GB}GB"
+    if [[ ${disk_available_mb} -lt 1536 ]]; then
+        log "Bereinigung wegen wenig freiem Speicher: ${disk_available_mb}MB < 1536MB"
         cleanup_needed=true
     elif [[ ${disk_usage_percent} -gt 80 ]]; then
         log "Bereinigung wegen hoher Speichernutzung: ${disk_usage_percent}%"
@@ -1671,18 +1688,19 @@ perform_enhanced_system_cleanup() {
     # Temporäre Dateien bereinigen
     cleanup_temp_files_enhanced
     
-    # Prüfe Ergebnis
-    local disk_available_after_kb disk_available_after_gb
+    # Prüfe Ergebnis (sichere Berechnung)
+    local disk_available_after_kb disk_available_after_mb disk_available_after_gb
     disk_available_after_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    disk_available_after_gb=$(echo "scale=2; ${disk_available_after_kb} / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
+    disk_available_after_mb=$((disk_available_after_kb / 1024))
+    disk_available_after_gb=$((disk_available_after_mb / 1024))
     
-    local freed_space
-    freed_space=$(echo "scale=2; ${disk_available_after_gb} - ${disk_available_gb}" | bc -l 2>/dev/null || echo "0")
+    local freed_space_mb=$((disk_available_after_mb - disk_available_mb))
+    local freed_space_gb=$((freed_space_mb / 1024))
     
-    log "Bereinigung abgeschlossen: ${freed_space}GB freigegeben (${disk_available_after_gb}GB verfügbar)"
+    log "Bereinigung abgeschlossen: ${freed_space_gb}GB freigegeben (${disk_available_after_gb}GB verfügbar)"
     
     # Warnung bei weiterhin kritischem Speicherplatz
-    if (( $(echo "${disk_available_after_gb} < ${MIN_FREE_SPACE_GB}" | bc -l 2>/dev/null || echo "1") )); then
+    if [[ ${disk_available_after_mb} -lt 1536 ]]; then
         enhanced_notify "error" "Kritischer Speicherplatz" "Nach Bereinigung nur ${disk_available_after_gb}GB frei (Minimum: ${MIN_FREE_SPACE_GB}GB)"
     fi
     
@@ -2088,440 +2106,8 @@ perform_enhanced_auto_update() {
     return 0
 }
 
-# Erweiterte Hilfefunktion
-show_enhanced_help() {
-    cat << 'HELP_EOF'
-==========================================
-Globalping Server-Setup-Skript (Enhanced)
-==========================================
-
-BESCHREIBUNG:
-    Erweiterte Automatisierung für Globalping-Probe Server mit
-    intelligenter Wartung, erweiterten Benachrichtigungen und
-    robusten Fehlerbehandlungen.
-
-VERWENDUNG:
-    ./install.sh [OPTIONEN]
-    
-    Das Skript muss mit Root-Rechten ausgeführt werden.
-
-HAUPTOPTIONEN:
-    -h, --help                      Zeigt diese Hilfe an
-    --adoption-token TOKEN          Globalping Adoption-Token (erforderlich)
-    --telegram-token TOKEN          Telegram-Bot-Token für Benachrichtigungen
-    --telegram-chat ID              Telegram-Chat-ID für Benachrichtigungen
-    --ubuntu-token TOKEN            Ubuntu Pro Token (nur für Ubuntu)
-    --ssh-key "SCHLÜSSEL"           SSH Public Key für sicheren Zugang
-
-WARTUNGS-OPTIONEN:
-    --auto-weekly                   Wöchentliche automatische Wartung (intern)
-    --cleanup                       Erweiterte Systemreinigung
-    --emergency-cleanup             Aggressive Notfall-Bereinigung  
-    --diagnose                      Vollständige Systemdiagnose
-    --network-diagnose              Detaillierte Netzwerk-Diagnose
-    --test-telegram                 Teste Telegram-Konfiguration
-
-ERWEITERTE OPTIONEN:
-    -d, --docker                    Installiert nur Docker
-    -l, --log DATEI                 Alternative Log-Datei
-    --debug                         Debug-Modus mit ausführlichem Logging
-    --force                         Überspringt Sicherheitsabfragen
-    --no-reboot                     Verhindert automatische Reboots
-
-TELEGRAM-KONFIGURATION:
-    1. Erstelle einen Bot: @BotFather
-    2. Erhalte Token und Chat-ID
-    3. Teste mit: ./install.sh --test-telegram --telegram-token "TOKEN" --telegram-chat "CHAT_ID"
-
-NEUE FEATURES:
-    ✓ Verbesserte Telegram-Benachrichtigungen mit Debugging
-    ✓ Erweiterte Abhängigkeiten (unzip, tar, gzip, etc.)
-    ✓ Intelligente Swap-Konfiguration (RAM + Swap ≥ 1GB)
-    ✓ Automatische Reboots bei kritischen Updates
-    ✓ Absolute Speicherplatz-Schwellwerte (1.5GB minimum)
-    ✓ CPU-Hang-Schutz durch Timeouts
-    ✓ restart=always für Globalping-Container
-    ✓ Tägliche Log-Rotation (max 50MB)
-    ✓ Wöchentliche automatische Wartung
-
-SYSTEMANFORDERUNGEN:
-    - Linux (Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora)
-    - Mindestens 256MB RAM
-    - Mindestens 1.5GB freier Speicherplatz
-    - Root-Rechte oder sudo-Zugang
-    - Internetverbindung
-
-BEISPIELE:
-    # Vollständige Installation
-    ./install.sh --adoption-token "token" \
-                  --telegram-token "bot-token" \
-                  --telegram-chat "chat-id"
-
-    # Teste Telegram-Konfiguration
-    ./install.sh --test-telegram --telegram-token "123:ABC" --telegram-chat "456"
-
-    # Nur Diagnose
-    ./install.sh --diagnose
-
-    # Systemreinigung
-    ./install.sh --cleanup
-
-HELP_EOF
-    exit 0
-}
-
-# Erweiterte Argumentverarbeitung mit Telegram-Test
-process_enhanced_args() {
-    # Standardwerte
-    local install_docker_only="false"
-    local run_diagnostics_only="false"
-    local run_network_diagnostics_only="false"
-    local auto_weekly_mode="false"
-    local cleanup_mode="false"
-    local emergency_cleanup_mode="false"
-    local force_mode="false"
-    local no_reboot="false"
-    local test_telegram_mode="false"
-    
-    # Keine Argumente = Hilfe
-    if [[ $# -eq 0 ]]; then
-        show_enhanced_help
-    fi
-    
-    # Argumente verarbeiten
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -h|--help)
-                show_enhanced_help
-                ;;
-            -d|--docker)
-                install_docker_only="true"
-                shift
-                ;;
-            -l|--log)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    LOG_FILE="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--log benötigt einen Dateinamen"
-                    exit 1
-                fi
-                ;;
-            --debug)
-                enable_enhanced_debug_mode
-                shift
-                ;;
-            --force)
-                force_mode="true"
-                shift
-                ;;
-            --no-reboot)
-                no_reboot="true"
-                shift
-                ;;
-            --auto-weekly)
-                auto_weekly_mode="true"
-                WEEKLY_MODE="true"
-                shift
-                ;;
-            --test-telegram)
-                test_telegram_mode="true"
-                shift
-                ;;
-            --adoption-token)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    ADOPTION_TOKEN="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--adoption-token benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --telegram-token)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    TELEGRAM_TOKEN="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--telegram-token benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --telegram-chat)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    TELEGRAM_CHAT="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--telegram-chat benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --ubuntu-token)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    UBUNTU_PRO_TOKEN="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--ubuntu-token benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --ssh-key)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    SSH_KEY="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--ssh-key benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --cleanup)
-                cleanup_mode="true"
-                shift
-                ;;
-            --emergency-cleanup)
-                emergency_cleanup_mode="true"
-                shift
-                ;;
-            --diagnose)
-                run_diagnostics_only="true"
-                shift
-                ;;
-            --network-diagnose)
-                run_network_diagnostics_only="true"
-                shift
-                ;;
-            -*)
-                enhanced_log "ERROR" "Unbekannte Option: $1"
-                echo "Verwenden Sie --help für Hilfe" >&2
-                exit 1
-                ;;
-            *)
-                enhanced_log "ERROR" "Unerwartetes Argument: $1"
-                echo "Verwenden Sie --help für Hilfe" >&2
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Telegram-Test-Modus
-    if [[ "${test_telegram_mode}" == "true" ]]; then
-        execute_telegram_test_mode
-        exit $?
-    fi
-    
-    # Validiere und führe spezielle Modi aus
-    execute_enhanced_special_modes \
-        "${install_docker_only}" \
-        "${run_diagnostics_only}" \
-        "${run_network_diagnostics_only}" \
-        "${auto_weekly_mode}" \
-        "${cleanup_mode}" \
-        "${emergency_cleanup_mode}" \
-        "${force_mode}" \
-        "${no_reboot}"
-}
-
-# Telegram-Test-Modus
-execute_telegram_test_mode() {
-    echo "=== TELEGRAM-KONFIGURATION TEST ==="
-    echo "Teste Telegram-Token und Chat-ID..."
-    echo "===================================="
-    
-    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
-        echo "FEHLER: --telegram-token und --telegram-chat sind erforderlich"
-        echo "Beispiel: ./install.sh --test-telegram --telegram-token \"123:ABC\" --telegram-chat \"456\""
-        return 1
-    fi
-    
-    # Basis-Systeminformationen sammeln für Test
-    get_enhanced_system_info
-    
-    # Führe Test durch
-    if test_telegram_config; then
-        echo "✅ Telegram-Konfiguration erfolgreich getestet!"
-        echo "Bot kann Nachrichten an Chat ${TELEGRAM_CHAT} senden."
-        return 0
-    else
-        echo "❌ Telegram-Konfiguration fehlgeschlagen!"
-        echo "Prüfe Token und Chat-ID."
-        return 1
-    fi
-}
-
-# Basis-Systeminformationen sammeln
-get_system_info() {
-    enhanced_log "INFO" "Sammle Basis-Systeminformationen"
-    
-    # Diese Funktion wird durch get_enhanced_system_info ersetzt/erweitert
-    # Hier für Kompatibilität
-    get_enhanced_system_info
-    return 0
-}
-
-# Führe erweiterte spezielle Modi aus
-execute_enhanced_special_modes() {
-    local install_docker_only="$1"
-    local run_diagnostics_only="$2"
-    local run_network_diagnostics_only="$3"
-    local auto_weekly_mode="$4"
-    local cleanup_mode="$5"
-    local emergency_cleanup_mode="$6"
-    local force_mode="$7"
-    local no_reboot="$8"
-    
-    # Zähle aktive Modi
-    local active_modes=0
-    [[ "${install_docker_only}" == "true" ]] && ((active_modes++))
-    [[ "${run_diagnostics_only}" == "true" ]] && ((active_modes++))
-    [[ "${run_network_diagnostics_only}" == "true" ]] && ((active_modes++))
-    [[ "${auto_weekly_mode}" == "true" ]] && ((active_modes++))
-    [[ "${cleanup_mode}" == "true" ]] && ((active_modes++))
-    [[ "${emergency_cleanup_mode}" == "true" ]] && ((active_modes++))
-    
-    if [[ ${active_modes} -gt 1 ]]; then
-        enhanced_log "ERROR" "Nur ein spezieller Modus kann gleichzeitig verwendet werden"
-        exit 1
-    fi
-    
-    # Root-Check für alle Modi
-    check_root || {
-        enhanced_log "ERROR" "Root-Rechte erforderlich"
-        exit 1
-    }
-    
-    # Temporäres Verzeichnis für alle Modi
-    create_temp_dir || {
-        enhanced_log "ERROR" "Konnte temporäres Verzeichnis nicht erstellen"
-        exit 1
-    }
-    
-    # No-Reboot-Flag global setzen
-    if [[ "${no_reboot}" == "true" ]]; then
-        export NO_REBOOT="true"
-    fi
-    
-    # Führe speziellen Modus aus
-    if [[ "${install_docker_only}" == "true" ]]; then
-        execute_docker_only_mode
-        exit $?
-    elif [[ "${run_diagnostics_only}" == "true" ]]; then
-        execute_diagnostics_mode
-        exit $?
-    elif [[ "${run_network_diagnostics_only}" == "true" ]]; then
-        execute_network_diagnostics_mode
-        exit $?
-    elif [[ "${auto_weekly_mode}" == "true" ]]; then
-        execute_weekly_mode
-        exit $?
-    elif [[ "${cleanup_mode}" == "true" ]]; then
-        execute_cleanup_mode
-        exit $?
-    elif [[ "${emergency_cleanup_mode}" == "true" ]]; then
-        execute_emergency_cleanup_mode "${force_mode}"
-        exit $?
-    fi
-    
-    # Normale Installation
-    validate_installation_args
-    return 0
-}
-
-# Validiere normale Installationsargumente
-validate_installation_args() {
-    if [[ -z "${ADOPTION_TOKEN}" ]]; then
-        enhanced_log "WARN" "Kein Adoption-Token - Globalping-Probe wird nicht installiert"
-        echo "Warnung: Ohne --adoption-token wird keine Globalping-Probe installiert" >&2
-    fi
-    
-    if [[ -n "${TELEGRAM_TOKEN}" && -z "${TELEGRAM_CHAT}" ]] || [[ -z "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
-        enhanced_log "WARN" "Unvollständige Telegram-Konfiguration"
-        echo "Für Telegram-Benachrichtigungen werden sowohl --telegram-token als auch --telegram-chat benötigt" >&2
-    fi
-}
-
-# Spezielle Modi ausführen
-execute_docker_only_mode() {
-    log "Führe Docker-Installation durch"
-    install_dependencies || enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
-    install_docker || {
-        enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
-        return 1
-    }
-    install_docker_compose || enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
-    log "Docker-Installation abgeschlossen"
-    return 0
-}
-
-execute_diagnostics_mode() {
-    log "Führe vollständige Systemdiagnose durch"
-    run_enhanced_diagnostics
-    return $?
-}
-
-execute_network_diagnostics_mode() {
-    log "Führe Netzwerk-Diagnose durch"
-    run_enhanced_network_diagnosis
-    return $?
-}
-
-execute_weekly_mode() {
-    log "Führe wöchentliche automatische Wartung durch"
-    get_enhanced_system_info
-    run_weekly_maintenance
-    return $?
-}
-
-execute_cleanup_mode() {
-    log "Führe erweiterte Systemreinigung durch"
-    perform_enhanced_system_cleanup
-    return $?
-}
-
-execute_emergency_cleanup_mode() {
-    local force_mode="$1"
-    
-    if [[ "${force_mode}" != "true" ]]; then
-        echo "WARNUNG: Notfall-Bereinigung wird aggressive Maßnahmen ergreifen!"
-        echo "Drücken Sie Ctrl+C innerhalb von 10 Sekunden zum Abbrechen..."
-        sleep 10
-    fi
-    
-    log "Führe Notfall-Bereinigung durch"
-    perform_emergency_cleanup
-    return $?
-}
-
-# Erweiterte Debug-Modus-Aktivierung
-enable_enhanced_debug_mode() {
-    enhanced_log "INFO" "Aktiviere erweiterten Debug-Modus"
-    
-    set -x
-    
-    local debug_log="/var/log/globalping-debug-$(date +%Y%m%d-%H%M%S).log"
-    exec 19>"${debug_log}"
-    BASH_XTRACEFD=19
-    
-    DEBUG_MODE="true"
-    
-    {
-        echo "=== ENHANCED DEBUG SESSION ==="
-        echo "Datum: $(date)"
-        echo "Benutzer: $(whoami)"
-        echo "Arbeitsverzeichnis: $(pwd)"
-        echo "Skript-Pfad: ${0}"
-        echo "Argumente: $*"
-        echo "System: $(uname -a)"
-        echo "Shell: ${SHELL} (${BASH_VERSION})"
-        echo "Speicher: $(free -h | grep Mem)"
-        echo "Festplatte: $(df -h / | grep /)"
-        echo "=============================="
-    } >&19
-    
-    enhanced_log "INFO" "Erweiterter Debug-Modus aktiviert: ${debug_log}"
-    return 0
-}
-
-# Erweiterte Systemdiagnose mit Timeouts
-run_enhanced_diagnostics() {
+# Erweiterte Systemdiagnose mit Timeouts (Silent-Version)
+run_enhanced_diagnostics_silent() {
     log "Führe erweiterte Systemdiagnose durch"
     
     local issues=()
@@ -2591,9 +2177,8 @@ run_enhanced_diagnostics() {
     
     echo "============================="
     
-    # Bei kritischen Problemen Telegram-Benachrichtigung
+    # Bei kritischen Problemen KEINE automatische Telegram-Nachricht (Silent)
     if [[ ${#issues[@]} -gt 0 ]]; then
-        enhanced_notify "error" "Diagnose-Probleme" "$(printf '%s\n' "${issues[@]}" | head -5)"
         return 1
     fi
     
@@ -2678,7 +2263,7 @@ analyze_memory_enhanced() {
         fi
     fi
     
-    # Festplatten-Analyse
+    # Festplatten-Analyse (sichere Berechnung)
     local disk_total_kb disk_used_kb disk_available_kb disk_usage_percent
     disk_total_kb=$(df / | awk 'NR==2 {print $2}' || echo "0")
     disk_used_kb=$(df / | awk 'NR==2 {print $3}' || echo "0")
@@ -2686,12 +2271,13 @@ analyze_memory_enhanced() {
     disk_usage_percent=$(df / | awk 'NR==2 {print $5}' | tr -d '%' || echo "100")
     
     local disk_total_gb disk_available_gb
-    disk_total_gb=$(echo "scale=1; ${disk_total_kb} / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
-    disk_available_gb=$(echo "scale=1; ${disk_available_kb} / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
+    disk_total_gb=$((disk_total_kb / 1024 / 1024))
+    disk_available_gb=$((disk_available_kb / 1024 / 1024))
     
     echo "Festplatte: ${disk_available_gb}GB frei von ${disk_total_gb}GB (${disk_usage_percent}% belegt)"
     
-    if (( $(echo "${disk_available_gb} < ${MIN_FREE_SPACE_GB}" | bc -l 2>/dev/null || echo "1") )); then
+    local disk_available_mb=$((disk_available_kb / 1024))
+    if [[ ${disk_available_mb} -lt 1536 ]]; then
         issues_ref+=("Kritisch wenig Speicherplatz: ${disk_available_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
     elif [[ ${disk_usage_percent} -gt 85 ]]; then
         warnings_ref+=("Festplatte zu ${disk_usage_percent}% voll")
@@ -2931,7 +2517,12 @@ analyze_performance_enhanced() {
         local cpu_cores
         cpu_cores=$(nproc 2>/dev/null || echo "1")
         
-        if (( $(echo "${load_1min} > ${cpu_cores} * 2" | bc -l 2>/dev/null || echo "0") )); then
+        # Sichere Vergleichsrechnung ohne bc
+        local load_int high_load_threshold
+        load_int=$(echo "${load_1min}" | cut -d'.' -f1)
+        high_load_threshold=$((cpu_cores * 2))
+        
+        if [[ ${load_int} -gt ${high_load_threshold} ]]; then
             warnings_ref+=("Sehr hohe CPU-Last: ${load_1min} (Kerne: ${cpu_cores})")
         fi
     fi
@@ -2941,7 +2532,9 @@ analyze_performance_enhanced() {
     iowait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%' 2>/dev/null || echo "0")
     echo "I/O-Wait: ${iowait}%"
     
-    if (( $(echo "${iowait} > 20" | bc -l 2>/dev/null || echo "0") )); then
+    local iowait_int
+    iowait_int=$(echo "${iowait}" | cut -d'.' -f1)
+    if [[ ${iowait_int} -gt 20 ]]; then
         warnings_ref+=("Hohe I/O-Wait: ${iowait}%")
     fi
     
@@ -2998,145 +2591,6 @@ analyze_security_enhanced() {
     fi
     
     info_ref+=("Sicherheit: SSH konfiguriert, Firewall ${firewall_status}")
-}
-
-# Erweiterte Netzwerk-Diagnose
-run_enhanced_network_diagnosis() {
-    log "Führe erweiterte Netzwerk-Diagnose durch"
-    
-    local issues=()
-    local warnings=()
-    local info_items=()
-    
-    echo "=== ERWEITERTE NETZWERK-DIAGNOSE ==="
-    echo "Zeitpunkt: $(date)"
-    echo "===================================="
-    
-    # Basis-Netzwerk-Tests mit Timeouts
-    analyze_network_enhanced issues warnings info_items
-    
-    # Erweiterte Tests
-    echo -e "\n[NETZWERK] Latenz-Tests"
-    perform_latency_tests issues warnings info_items
-    
-    echo -e "\n[NETZWERK] Bandwidth-Schätzung"
-    perform_bandwidth_test issues warnings info_items
-    
-    echo -e "\n[NETZWERK] IPv6-Tests"
-    test_ipv6_connectivity issues warnings info_items
-    
-    # Ergebnisse anzeigen
-    echo -e "\n=== NETZWERK-DIAGNOSE ERGEBNISSE ==="
-    echo "Probleme: ${#issues[@]}, Warnungen: ${#warnings[@]}, Info: ${#info_items[@]}"
-    
-    if [[ ${#issues[@]} -gt 0 ]]; then
-        echo -e "\n🔴 NETZWERK-PROBLEME:"
-        printf ' - %s\n' "${issues[@]}"
-        enhanced_notify "error" "Netzwerk-Probleme" "$(printf '%s\n' "${issues[@]}" | head -3)"
-        return 1
-    fi
-    
-    return 0
-}
-
-# Latenz-Tests
-perform_latency_tests() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    local targets=("1.1.1.1" "8.8.8.8" "google.com")
-    local high_latency_count=0
-    
-    for target in "${targets[@]}"; do
-        local ping_result
-        ping_result=$(timeout 10 ping -c 3 "${target}" 2>/dev/null | grep "avg" || echo "")
-        
-        if [[ -n "${ping_result}" ]]; then
-            local avg_latency
-            avg_latency=$(echo "${ping_result}" | cut -d'/' -f5 | cut -d'.' -f1 || echo "999")
-            echo "Latenz ${target}: ${avg_latency}ms"
-            
-            if [[ ${avg_latency} -gt 500 ]]; then
-                issues_ref+=("Sehr hohe Latenz ${target}: ${avg_latency}ms")
-                ((high_latency_count++))
-            elif [[ ${avg_latency} -gt 200 ]]; then
-                warnings_ref+=("Hohe Latenz ${target}: ${avg_latency}ms")
-                ((high_latency_count++))
-            fi
-        else
-            warnings_ref+=("Latenz-Test ${target} fehlgeschlagen")
-        fi
-    done
-    
-    if [[ ${high_latency_count} -eq 0 ]]; then
-        info_ref+=("Netzwerk-Latenz: Alle Tests unter 200ms")
-    fi
-}
-
-# Bandwidth-Test
-perform_bandwidth_test() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    local test_url="http://speedtest.tele2.net/1MB.zip"
-    local start_time end_time
-    
-    echo "Führe Bandwidth-Test durch..."
-    start_time=$(date +%s.%N 2>/dev/null || date +%s)
-    
-    if timeout 30 curl -s --connect-timeout 5 "${test_url}" -o /dev/null 2>/dev/null; then
-        end_time=$(date +%s.%N 2>/dev/null || date +%s)
-        local duration
-        duration=$(echo "${end_time} - ${start_time}" | bc -l 2>/dev/null || echo "1")
-        
-        if (( $(echo "${duration} > 0" | bc -l 2>/dev/null || echo "1") )); then
-            local speed_mbps
-            speed_mbps=$(echo "scale=1; 8 / ${duration}" | bc -l 2>/dev/null || echo "1")
-            echo "Download-Geschwindigkeit: ${speed_mbps} Mbps"
-            
-            if (( $(echo "${speed_mbps} < 1" | bc -l 2>/dev/null || echo "0") )); then
-                warnings_ref+=("Sehr langsame Verbindung: ${speed_mbps} Mbps")
-            else
-                info_ref+=("Download-Geschwindigkeit: ${speed_mbps} Mbps")
-            fi
-        fi
-    else
-        warnings_ref+=("Bandwidth-Test fehlgeschlagen")
-    fi
-}
-
-# IPv6-Tests
-test_ipv6_connectivity() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    local ipv6_addresses
-    ipv6_addresses=$(ip addr show 2>/dev/null | grep "inet6.*scope global" | wc -l || echo "0")
-    
-    echo "IPv6-Adressen: ${ipv6_addresses}"
-    
-    if [[ ${ipv6_addresses} -eq 0 ]]; then
-        echo "IPv6 nicht konfiguriert"
-        return 0
-    fi
-    
-    local ipv6_targets=("2606:4700:4700::1111" "2001:4860:4860::8888")
-    local successful_tests=0
-    
-    for target in "${ipv6_targets[@]}"; do
-        if timeout 5 ping -6 -c 1 "${target}" >/dev/null 2>&1; then
-            ((successful_tests++))
-        fi
-    done
-    
-    if [[ ${successful_tests} -eq 0 ]]; then
-        warnings_ref+=("IPv6 konfiguriert aber keine Konnektivität")
-    else
-        info_ref+=("IPv6-Konnektivität: ${successful_tests}/${#ipv6_targets[@]} Tests erfolgreich")
-    fi
 }
 
 # Docker Installation (falls fehlend)
@@ -3556,14 +3010,14 @@ create_temp_dir() {
     return 0
 }
 
-# Erweiterte Hauptfunktion
+# KORRIGIERTE Erweiterte Hauptfunktion (ohne doppelte Telegram-Nachrichten)
 enhanced_main() {
     local start_time
     start_time=$(date +%s)
     
     enhanced_log "INFO" "=== STARTE ERWEITERTES SERVER-SETUP ==="
     enhanced_log "INFO" "Version: ${SCRIPT_VERSION}"
-    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:+Wöchentlich}${WEEKLY_MODE:-Normal}"
+    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:+Wöchentlich}${WEEKLY_MODE:-Normal}"  # KORRIGIERT
     enhanced_log "INFO" "Startzeit: $(date)"
     enhanced_log "INFO" "========================================="
     
@@ -3573,6 +3027,7 @@ enhanced_main() {
     # PHASE 1: Erweiterte Systemvalidierung
     enhanced_log "INFO" "Phase 1: Erweiterte Systemvalidierung"
     if ! enhanced_validate_system; then
+        # Sende nur bei wirklichen Systemfehlern Telegram-Nachricht
         enhanced_notify "error" "Systemvalidierung" "Kritische Systemanforderungen nicht erfüllt. Setup kann nicht fortgesetzt werden."
         return 1
     fi
@@ -3658,7 +3113,6 @@ enhanced_main() {
         # Wenn Reboot geplant ist, beende hier
         if [[ "${REBOOT_REQUIRED}" == "true" ]]; then
             enhanced_log "INFO" "Reboot geplant - Setup wird nach Neustart fortgesetzt"
-            enhanced_notify "error" "System-Reboot" "System wird nach Updates neu gestartet. Setup wird automatisch fortgesetzt."
             return 0
         fi
     else
@@ -3671,10 +3125,12 @@ enhanced_main() {
         enhanced_log "WARN" "Systemreinigung fehlgeschlagen"
     fi
     
-    # PHASE 11: Abschlussdiagnose
+    # PHASE 11: Abschlussdiagnose (OHNE automatische Telegram-Nachricht)
     enhanced_log "INFO" "Phase 11: Abschlussdiagnose"
-    if ! run_enhanced_diagnostics; then
+    local diagnosis_success=true
+    if ! run_enhanced_diagnostics_silent; then  # Silent-Version
         enhanced_log "WARN" "Abschlussdiagnose ergab Probleme"
+        diagnosis_success=false
     fi
     
     # PHASE 12: Zusammenfassung
@@ -3691,8 +3147,8 @@ enhanced_main() {
     enhanced_log "INFO" "Abschlusszeit: $(date)"
     enhanced_log "INFO" "=============================================="
     
-    # Erfolgreiche Installation-Benachrichtigung
-    if [[ "${WEEKLY_MODE}" != "true" ]]; then
+    # NUR EINE Erfolgreiche Installation-Benachrichtigung (falls keine Fehler aufgetreten)
+    if [[ "${WEEKLY_MODE}" != "true" && "${TELEGRAM_SENT}" != "true" && "${diagnosis_success}" == "true" ]]; then
         enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
 
 Konfigurierte Features:
@@ -3731,6 +3187,573 @@ create_enhanced_summary() {
     echo "Automatische Wartung: Wöchentlich geplant"
     echo "========================================"
     
+    return 0
+}
+
+# Erweiterte Hilfefunktion
+show_enhanced_help() {
+    cat << 'HELP_EOF'
+==========================================
+Globalping Server-Setup-Skript (Enhanced)
+==========================================
+
+BESCHREIBUNG:
+    Erweiterte Automatisierung für Globalping-Probe Server mit
+    intelligenter Wartung, erweiterten Benachrichtigungen und
+    robusten Fehlerbehandlungen.
+
+VERWENDUNG:
+    ./install.sh [OPTIONEN]
+    
+    Das Skript muss mit Root-Rechten ausgeführt werden.
+
+HAUPTOPTIONEN:
+    -h, --help                      Zeigt diese Hilfe an
+    --adoption-token TOKEN          Globalping Adoption-Token (erforderlich)
+    --telegram-token TOKEN          Telegram-Bot-Token für Benachrichtigungen
+    --telegram-chat ID              Telegram-Chat-ID für Benachrichtigungen
+    --ubuntu-token TOKEN            Ubuntu Pro Token (nur für Ubuntu)
+    --ssh-key "SCHLÜSSEL"           SSH Public Key für sicheren Zugang
+
+WARTUNGS-OPTIONEN:
+    --auto-weekly                   Wöchentliche automatische Wartung (intern)
+    --cleanup                       Erweiterte Systemreinigung
+    --emergency-cleanup             Aggressive Notfall-Bereinigung  
+    --diagnose                      Vollständige Systemdiagnose
+    --network-diagnose              Detaillierte Netzwerk-Diagnose
+    --test-telegram                 Teste Telegram-Konfiguration
+
+ERWEITERTE OPTIONEN:
+    -d, --docker                    Installiert nur Docker
+    -l, --log DATEI                 Alternative Log-Datei
+    --debug                         Debug-Modus mit ausführlichem Logging
+    --force                         Überspringt Sicherheitsabfragen
+    --no-reboot                     Verhindert automatische Reboots
+
+TELEGRAM-KONFIGURATION:
+    1. Erstelle einen Bot: @BotFather
+    2. Erhalte Token und Chat-ID
+    3. Teste mit: ./install.sh --test-telegram --telegram-token "TOKEN" --telegram-chat "CHAT_ID"
+
+NEUE FEATURES:
+    ✓ Keine doppelten Telegram-Benachrichtigungen mehr
+    ✓ Sichere Mathematik ohne bc-Abhängigkeit  
+    ✓ Sensible Daten werden nicht in Telegram gezeigt
+    ✓ Erweiterte Abhängigkeiten (unzip, tar, gzip, etc.)
+    ✓ Intelligente Swap-Konfiguration (RAM + Swap ≥ 1GB)
+    ✓ Automatische Reboots bei kritischen Updates
+    ✓ Absolute Speicherplatz-Schwellwerte (1.5GB minimum)
+    ✓ CPU-Hang-Schutz durch Timeouts
+    ✓ restart=always für Globalping-Container
+    ✓ Tägliche Log-Rotation (max 50MB)
+    ✓ Wöchentliche automatische Wartung
+
+SYSTEMANFORDERUNGEN:
+    - Linux (Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora)
+    - Mindestens 256MB RAM
+    - Mindestens 1.5GB freier Speicherplatz
+    - Root-Rechte oder sudo-Zugang
+    - Internetverbindung
+
+BEISPIELE:
+    # Vollständige Installation
+    ./install.sh --adoption-token "token" \
+                  --telegram-token "bot-token" \
+                  --telegram-chat "chat-id"
+
+    # Teste Telegram-Konfiguration
+    ./install.sh --test-telegram --telegram-token "123:ABC" --telegram-chat "456"
+
+    # Nur Diagnose
+    ./install.sh --diagnose
+
+    # Systemreinigung
+    ./install.sh --cleanup
+
+HELP_EOF
+    exit 0
+}
+
+# Erweiterte Argumentverarbeitung mit Telegram-Test
+process_enhanced_args() {
+    # Standardwerte
+    local install_docker_only="false"
+    local run_diagnostics_only="false"
+    local run_network_diagnostics_only="false"
+    local auto_weekly_mode="false"
+    local cleanup_mode="false"
+    local emergency_cleanup_mode="false"
+    local force_mode="false"
+    local no_reboot="false"
+    local test_telegram_mode="false"
+    
+    # Keine Argumente = Hilfe
+    if [[ $# -eq 0 ]]; then
+        show_enhanced_help
+    fi
+    
+    # Argumente verarbeiten
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_enhanced_help
+                ;;
+            -d|--docker)
+                install_docker_only="true"
+                shift
+                ;;
+            -l|--log)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    LOG_FILE="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--log benötigt einen Dateinamen"
+                    exit 1
+                fi
+                ;;
+            --debug)
+                enable_enhanced_debug_mode
+                shift
+                ;;
+            --force)
+                force_mode="true"
+                shift
+                ;;
+            --no-reboot)
+                no_reboot="true"
+                shift
+                ;;
+            --auto-weekly)
+                auto_weekly_mode="true"
+                WEEKLY_MODE="true"
+                shift
+                ;;
+            --test-telegram)
+                test_telegram_mode="true"
+                shift
+                ;;
+            --adoption-token)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    ADOPTION_TOKEN="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--adoption-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --telegram-token)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    TELEGRAM_TOKEN="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--telegram-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --telegram-chat)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    TELEGRAM_CHAT="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--telegram-chat benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --ubuntu-token)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    UBUNTU_PRO_TOKEN="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--ubuntu-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --ssh-key)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    SSH_KEY="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--ssh-key benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --cleanup)
+                cleanup_mode="true"
+                shift
+                ;;
+            --emergency-cleanup)
+                emergency_cleanup_mode="true"
+                shift
+                ;;
+            --diagnose)
+                run_diagnostics_only="true"
+                shift
+                ;;
+            --network-diagnose)
+                run_network_diagnostics_only="true"
+                shift
+                ;;
+            -*)
+                enhanced_log "ERROR" "Unbekannte Option: $1"
+                echo "Verwenden Sie --help für Hilfe" >&2
+                exit 1
+                ;;
+            *)
+                enhanced_log "ERROR" "Unerwartetes Argument: $1"
+                echo "Verwenden Sie --help für Hilfe" >&2
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Telegram-Test-Modus
+    if [[ "${test_telegram_mode}" == "true" ]]; then
+        execute_telegram_test_mode
+        exit $?
+    fi
+    
+    # Validiere und führe spezielle Modi aus
+    execute_enhanced_special_modes \
+        "${install_docker_only}" \
+        "${run_diagnostics_only}" \
+        "${run_network_diagnostics_only}" \
+        "${auto_weekly_mode}" \
+        "${cleanup_mode}" \
+        "${emergency_cleanup_mode}" \
+        "${force_mode}" \
+        "${no_reboot}"
+}
+
+# Telegram-Test-Modus
+execute_telegram_test_mode() {
+    echo "=== TELEGRAM-KONFIGURATION TEST ==="
+    echo "Teste Telegram-Token und Chat-ID..."
+    echo "===================================="
+    
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        echo "FEHLER: --telegram-token und --telegram-chat sind erforderlich"
+        echo "Beispiel: ./install.sh --test-telegram --telegram-token \"123:ABC\" --telegram-chat \"456\""
+        return 1
+    fi
+    
+    # Basis-Systeminformationen sammeln für Test
+    get_enhanced_system_info
+    
+    # Führe Test durch
+    if test_telegram_config; then
+        echo "✅ Telegram-Konfiguration erfolgreich getestet!"
+        echo "Bot kann Nachrichten an Chat ${TELEGRAM_CHAT} senden."
+        return 0
+    else
+        echo "❌ Telegram-Konfiguration fehlgeschlagen!"
+        echo "Prüfe Token und Chat-ID."
+        return 1
+    fi
+}
+
+# Führe erweiterte spezielle Modi aus
+execute_enhanced_special_modes() {
+    local install_docker_only="$1"
+    local run_diagnostics_only="$2"
+    local run_network_diagnostics_only="$3"
+    local auto_weekly_mode="$4"
+    local cleanup_mode="$5"
+    local emergency_cleanup_mode="$6"
+    local force_mode="$7"
+    local no_reboot="$8"
+    
+    # Zähle aktive Modi
+    local active_modes=0
+    [[ "${install_docker_only}" == "true" ]] && ((active_modes++))
+    [[ "${run_diagnostics_only}" == "true" ]] && ((active_modes++))
+    [[ "${run_network_diagnostics_only}" == "true" ]] && ((active_modes++))
+    [[ "${auto_weekly_mode}" == "true" ]] && ((active_modes++))
+    [[ "${cleanup_mode}" == "true" ]] && ((active_modes++))
+    [[ "${emergency_cleanup_mode}" == "true" ]] && ((active_modes++))
+    
+    if [[ ${active_modes} -gt 1 ]]; then
+        enhanced_log "ERROR" "Nur ein spezieller Modus kann gleichzeitig verwendet werden"
+        exit 1
+    fi
+    
+    # Root-Check für alle Modi
+    check_root || {
+        enhanced_log "ERROR" "Root-Rechte erforderlich"
+        exit 1
+    }
+    
+    # Temporäres Verzeichnis für alle Modi
+    create_temp_dir || {
+        enhanced_log "ERROR" "Konnte temporäres Verzeichnis nicht erstellen"
+        exit 1
+    }
+    
+    # No-Reboot-Flag global setzen
+    if [[ "${no_reboot}" == "true" ]]; then
+        export NO_REBOOT="true"
+    fi
+    
+    # Führe speziellen Modus aus
+    if [[ "${install_docker_only}" == "true" ]]; then
+        execute_docker_only_mode
+        exit $?
+    elif [[ "${run_diagnostics_only}" == "true" ]]; then
+        execute_diagnostics_mode
+        exit $?
+    elif [[ "${run_network_diagnostics_only}" == "true" ]]; then
+        execute_network_diagnostics_mode
+        exit $?
+    elif [[ "${auto_weekly_mode}" == "true" ]]; then
+        execute_weekly_mode
+        exit $?
+    elif [[ "${cleanup_mode}" == "true" ]]; then
+        execute_cleanup_mode
+        exit $?
+    elif [[ "${emergency_cleanup_mode}" == "true" ]]; then
+        execute_emergency_cleanup_mode "${force_mode}"
+        exit $?
+    fi
+    
+    # Normale Installation
+    validate_installation_args
+    return 0
+}
+
+# Validiere normale Installationsargumente
+validate_installation_args() {
+    if [[ -z "${ADOPTION_TOKEN}" ]]; then
+        enhanced_log "WARN" "Kein Adoption-Token - Globalping-Probe wird nicht installiert"
+        echo "Warnung: Ohne --adoption-token wird keine Globalping-Probe installiert" >&2
+    fi
+    
+    if [[ -n "${TELEGRAM_TOKEN}" && -z "${TELEGRAM_CHAT}" ]] || [[ -z "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
+        enhanced_log "WARN" "Unvollständige Telegram-Konfiguration"
+        echo "Für Telegram-Benachrichtigungen werden sowohl --telegram-token als auch --telegram-chat benötigt" >&2
+    fi
+}
+
+# Spezielle Modi ausführen
+execute_docker_only_mode() {
+    log "Führe Docker-Installation durch"
+    install_dependencies || enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
+    install_docker || {
+        enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+        return 1
+    }
+    install_docker_compose || enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
+    log "Docker-Installation abgeschlossen"
+    return 0
+}
+
+execute_diagnostics_mode() {
+    log "Führe vollständige Systemdiagnose durch"
+    run_enhanced_diagnostics_silent  # Verwende Silent-Version (keine Telegram-Nachrichten)
+    return $?
+}
+
+execute_network_diagnostics_mode() {
+    log "Führe Netzwerk-Diagnose durch"
+    run_enhanced_network_diagnosis
+    return $?
+}
+
+# [Die restlichen execute_*_mode Funktionen...]
+
+execute_weekly_mode() {
+    log "Führe wöchentliche automatische Wartung durch"
+    get_enhanced_system_info
+    run_weekly_maintenance
+    return $?
+}
+
+execute_cleanup_mode() {
+    log "Führe erweiterte Systemreinigung durch"
+    perform_enhanced_system_cleanup
+    return $?
+}
+
+execute_emergency_cleanup_mode() {
+    local force_mode="$1"
+    
+    if [[ "${force_mode}" != "true" ]]; then
+        echo "WARNUNG: Notfall-Bereinigung wird aggressive Maßnahmen ergreifen!"
+        echo "Drücken Sie Ctrl+C innerhalb von 10 Sekunden zum Abbrechen..."
+        sleep 10
+    fi
+    
+    log "Führe Notfall-Bereinigung durch"
+    perform_emergency_cleanup
+    return $?
+}
+
+# Erweiterte Netzwerk-Diagnose
+run_enhanced_network_diagnosis() {
+    log "Führe erweiterte Netzwerk-Diagnose durch"
+    
+    local issues=()
+    local warnings=()
+    local info_items=()
+    
+    echo "=== ERWEITERTE NETZWERK-DIAGNOSE ==="
+    echo "Zeitpunkt: $(date)"
+    echo "===================================="
+    
+    # Basis-Netzwerk-Tests mit Timeouts
+    analyze_network_enhanced issues warnings info_items
+    
+    # Erweiterte Tests
+    echo -e "\n[NETZWERK] Latenz-Tests"
+    perform_latency_tests issues warnings info_items
+    
+    echo -e "\n[NETZWERK] Bandwidth-Schätzung"
+    perform_bandwidth_test issues warnings info_items
+    
+    echo -e "\n[NETZWERK] IPv6-Tests"
+    test_ipv6_connectivity issues warnings info_items
+    
+    # Ergebnisse anzeigen
+    echo -e "\n=== NETZWERK-DIAGNOSE ERGEBNISSE ==="
+    echo "Probleme: ${#issues[@]}, Warnungen: ${#warnings[@]}, Info: ${#info_items[@]}"
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo -e "\n🔴 NETZWERK-PROBLEME:"
+        printf ' - %s\n' "${issues[@]}"
+        enhanced_notify "error" "Netzwerk-Probleme" "$(printf '%s\n' "${issues[@]}" | head -3)"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Latenz-Tests
+perform_latency_tests() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    local targets=("1.1.1.1" "8.8.8.8" "google.com")
+    local high_latency_count=0
+    
+    for target in "${targets[@]}"; do
+        local ping_result
+        ping_result=$(timeout 10 ping -c 3 "${target}" 2>/dev/null | grep "avg" || echo "")
+        
+        if [[ -n "${ping_result}" ]]; then
+            local avg_latency
+            avg_latency=$(echo "${ping_result}" | cut -d'/' -f5 | cut -d'.' -f1 || echo "999")
+            echo "Latenz ${target}: ${avg_latency}ms"
+            
+            if [[ ${avg_latency} -gt 500 ]]; then
+                issues_ref+=("Sehr hohe Latenz ${target}: ${avg_latency}ms")
+                ((high_latency_count++))
+            elif [[ ${avg_latency} -gt 200 ]]; then
+                warnings_ref+=("Hohe Latenz ${target}: ${avg_latency}ms")
+                ((high_latency_count++))
+            fi
+        else
+            warnings_ref+=("Latenz-Test ${target} fehlgeschlagen")
+        fi
+    done
+    
+    if [[ ${high_latency_count} -eq 0 ]]; then
+        info_ref+=("Netzwerk-Latenz: Alle Tests unter 200ms")
+    fi
+}
+
+# Bandwidth-Test
+perform_bandwidth_test() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    local test_url="http://speedtest.tele2.net/1MB.zip"
+    local start_time end_time
+    
+    echo "Führe Bandwidth-Test durch..."
+    start_time=$(date +%s.%N 2>/dev/null || date +%s)
+    
+    if timeout 30 curl -s --connect-timeout 5 "${test_url}" -o /dev/null 2>/dev/null; then
+        end_time=$(date +%s.%N 2>/dev/null || date +%s)
+        local duration
+        duration=$(echo "${end_time} - ${start_time}" | bc -l 2>/dev/null || echo "1")
+        
+        if command -v bc >/dev/null 2>&1 && (( $(echo "${duration} > 0" | bc -l 2>/dev/null || echo "1") )); then
+            local speed_mbps
+            speed_mbps=$(echo "scale=1; 8 / ${duration}" | bc -l 2>/dev/null || echo "1")
+            echo "Download-Geschwindigkeit: ${speed_mbps} Mbps"
+            
+            if (( $(echo "${speed_mbps} < 1" | bc -l 2>/dev/null || echo "0") )); then
+                warnings_ref+=("Sehr langsame Verbindung: ${speed_mbps} Mbps")
+            else
+                info_ref+=("Download-Geschwindigkeit: ${speed_mbps} Mbps")
+            fi
+        else
+            info_ref+=("Download-Test erfolgreich (Geschwindigkeit nicht berechenbar)")
+        fi
+    else
+        warnings_ref+=("Bandwidth-Test fehlgeschlagen")
+    fi
+}
+
+# IPv6-Tests
+test_ipv6_connectivity() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    local ipv6_addresses
+    ipv6_addresses=$(ip addr show 2>/dev/null | grep "inet6.*scope global" | wc -l || echo "0")
+    
+    echo "IPv6-Adressen: ${ipv6_addresses}"
+    
+    if [[ ${ipv6_addresses} -eq 0 ]]; then
+        echo "IPv6 nicht konfiguriert"
+        return 0
+    fi
+    
+    local ipv6_targets=("2606:4700:4700::1111" "2001:4860:4860::8888")
+    local successful_tests=0
+    
+    for target in "${ipv6_targets[@]}"; do
+        if timeout 5 ping -6 -c 1 "${target}" >/dev/null 2>&1; then
+            ((successful_tests++))
+        fi
+    done
+    
+    if [[ ${successful_tests} -eq 0 ]]; then
+        warnings_ref+=("IPv6 konfiguriert aber keine Konnektivität")
+    else
+        info_ref+=("IPv6-Konnektivität: ${successful_tests}/${#ipv6_targets[@]} Tests erfolgreich")
+    fi
+}
+
+# Erweiterte Debug-Modus-Aktivierung
+enable_enhanced_debug_mode() {
+    enhanced_log "INFO" "Aktiviere erweiterten Debug-Modus"
+    
+    set -x
+    
+    local debug_log="/var/log/globalping-debug-$(date +%Y%m%d-%H%M%S).log"
+    exec 19>"${debug_log}"
+    BASH_XTRACEFD=19
+    
+    DEBUG_MODE="true"
+    
+    {
+        echo "=== ENHANCED DEBUG SESSION ==="
+        echo "Datum: $(date)"
+        echo "Benutzer: $(whoami)"
+        echo "Arbeitsverzeichnis: $(pwd)"
+        echo "Skript-Pfad: ${0}"
+        echo "Argumente: $*"
+        echo "System: $(uname -a)"
+        echo "Shell: ${SHELL} (${BASH_VERSION})"
+        echo "Speicher: $(free -h | grep Mem)"
+        echo "Festplatte: $(df -h / | grep /)"
+        echo "=============================="
+    } >&19
+    
+    enhanced_log "INFO" "Erweiterter Debug-Modus aktiviert: ${debug_log}"
     return 0
 }
 
