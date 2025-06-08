@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.0.8"
+readonly SCRIPT_VERSION="2025.06.08-v1.0.9"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -90,7 +90,7 @@ get_enhanced_system_info() {
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
 }
 
-# OPTIMIERTE Telegram-Benachrichtigung (mit Fehlerbehandlung)
+# OPTIMIERTE Telegram-Benachrichtigung mit nützlichen Links
 enhanced_notify() {
     local level="$1"
     local title="$2"
@@ -125,30 +125,35 @@ enhanced_notify() {
     local extended_message
     if [[ "${level}" == "install_success" ]]; then
         # Sammle Systeminformationen SICHER
-        local ram_info disk_info docker_container docker_status restart_policy
+        local ram_info disk_info swap_info load_info
         local auto_update_status ssh_status ubuntu_pro_status
+        local globalping_status docker_installed
         
-        # Sichere Sammlung der Informationen
+        # Sichere Sammlung der Systeminformationen
         ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
         disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" belegt)"}' || echo "unbekannt")
+        swap_info=$(free -h 2>/dev/null | grep Swap | awk '{print $2}' || echo "0B")
+        load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
         
-        # Docker-Informationen sicher sammeln
-        if command -v docker >/dev/null 2>&1; then
-            docker_container=$(docker ps --format "{{.Names}}" 2>/dev/null | grep globalping | head -1 || echo "nicht gefunden")
-            docker_status=$(docker inspect -f '{{.State.Status}}' globalping-probe 2>/dev/null || echo "unbekannt")
-            restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' globalping-probe 2>/dev/null || echo "unbekannt")
-        else
-            docker_container="Docker nicht verfügbar"
-            docker_status="N/A"
-            restart_policy="N/A"
-        fi
-        
-        # Weitere Status-Informationen
+        # Status-Informationen
         auto_update_status=$(systemctl is-enabled globalping-update.timer 2>/dev/null || echo "crontab")
         ssh_status="${SSH_KEY:+✓ Konfiguriert}${SSH_KEY:-✗ Nicht gesetzt}"
-        ubuntu_pro_status="${UBUNTU_PRO_TOKEN:+✓ Token vorhanden}${UBUNTU_PRO_TOKEN:-✗ Nicht verwendet}"
+        ubuntu_pro_status="${UBUNTU_PRO_TOKEN:+✓ Aktiv}${UBUNTU_PRO_TOKEN:-✗ Nicht verwendet}"
         
-        # Erweiterte Success-Nachricht (OPTIMIERT)
+        # Docker & Globalping Status (vereinfacht)
+        if command -v docker >/dev/null 2>&1; then
+            docker_installed="✓ Installiert"
+            if docker ps --format "{{.Names}}" 2>/dev/null | grep -q globalping; then
+                globalping_status="✓ Aktiv"
+            else
+                globalping_status="✗ Nicht gefunden"
+            fi
+        else
+            docker_installed="✗ Nicht installiert"
+            globalping_status="✗ Docker fehlt"
+        fi
+        
+        # Erweiterte Success-Nachricht mit Links
         extended_message="${icon} ${emoji}
 
 🌍 SERVER-DETAILS:
@@ -162,16 +167,12 @@ enhanced_notify() {
 💾 SYSTEM-STATUS:
 ├─ RAM: ${ram_info}
 ├─ Festplatte: ${disk_info}
-├─ Swap: $(free -h 2>/dev/null | grep Swap | awk '{print $2}' || echo "0B")
-└─ Load: $(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
+├─ Swap: ${swap_info}
+└─ Load: ${load_info}
 
-🐳 DOCKER & GLOBALPING:
-├─ Container: ${docker_container}
-├─ Status: ${docker_status}
-├─ Restart-Policy: ${restart_policy}
-└─ Version: $(docker inspect -f '{{.Config.Image}}' globalping-probe 2>/dev/null | cut -d':' -f2 || echo "latest")
-
-⚙️ KONFIGURATION:
+🔧 DIENSTE:
+├─ Docker: ${docker_installed}
+├─ Globalping: ${globalping_status}
 ├─ Auto-Update: ${auto_update_status}
 ├─ SSH-Schlüssel: ${ssh_status}
 ├─ Ubuntu Pro: ${ubuntu_pro_status}
@@ -180,29 +181,28 @@ enhanced_notify() {
 📋 ${title}:
 ${message}
 
-🔧 Wartung: Sonntag 03:00 UTC
-📊 Details: /var/log/globalping-install.log"
+🔗 NÜTZLICHE LINKS:
+├─ IP-Details: https://ipinfo.io/${PUBLIC_IP}
+├─ ASN-Info: https://bgp.he.net/${ASN}
+├─ WHOIS: https://whois.net/ip/${PUBLIC_IP}
+├─ Geo-Map: https://db-ip.com/${PUBLIC_IP}
+└─ Provider: https://ipinfo.io/${ASN}
+
+⏰ Wartung: Sonntag 03:00 UTC
+📊 Logs: /var/log/globalping-install.log"
 
     elif [[ "${level}" == "error" ]]; then
-        # Sammle Fehler-Informationen SICHER
-        local system_status error_context docker_info
+        # Kompakte Fehler-Nachricht mit Links für Debug
+        local system_status error_context
         
-        system_status=$(printf "RAM: %s | Festplatte: %s | Load: %s" \
+        system_status=$(printf "RAM: %s | HDD: %s | Load: %s" \
             "$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")" \
             "$(df -h / 2>/dev/null | awk 'NR==2 {print $4" frei"}' || echo "?")" \
             "$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "?")")
         
         # Letzte relevante Log-Einträge
-        error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -3 || echo "Keine Fehler-Logs")
+        error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -2 | sed 's/^.*] //' || echo "Keine Details verfügbar")
         
-        # Docker-Status bei Fehlern
-        if command -v docker >/dev/null 2>&1; then
-            docker_info="Docker: $(systemctl is-active docker 2>/dev/null || echo "inaktiv")
-Container: $(docker ps --format "{{.Names}}" 2>/dev/null | grep globalping | head -1 || echo "nicht gefunden")"
-        else
-            docker_info="Docker: Nicht verfügbar"
-        fi
-
         # Kompakte Fehler-Nachricht
         extended_message="${icon} ${emoji}
 
@@ -213,26 +213,32 @@ Container: $(docker ps --format "{{.Names}}" 2>/dev/null | grep globalping | hea
 🚨 FEHLER-DETAILS:
 ${title}: ${message}
 
-💻 SYSTEM-STATUS:
-${system_status}
+💻 SYSTEM: ${system_status}
 
-🐳 ${docker_info}
-
-📋 LETZTE FEHLER:
+📋 KONTEXT:
 ${error_context}
 
-🔧 Manuelle Prüfung erforderlich!"
+🔗 SERVER-INFO:
+├─ IP-Details: https://ipinfo.io/${PUBLIC_IP}
+├─ ASN-Info: https://bgp.he.net/${ASN}
+└─ WHOIS: https://whois.net/ip/${PUBLIC_IP}
+
+🔧 SSH-Zugang: ssh root@${PUBLIC_IP}
+📊 Logs: tail -50 /var/log/globalping-install.log"
     fi
     
     log "Sende erweiterte Telegram-Nachricht (${#extended_message} Zeichen)..."
     
-    # Telegram-Limit: 4096 Zeichen
+    # Debug: Zeige die ersten 200 Zeichen der Nachricht
+    log "DEBUG: Nachricht-Anfang: $(echo "${extended_message}" | head -c 200)..."
+    
+    # Telegram-Limit beachten
     if [[ ${#extended_message} -gt 4000 ]]; then
         log "Nachricht zu lang (${#extended_message} Zeichen), kürze auf 4000"
         extended_message=$(echo "${extended_message}" | head -c 3900)
         extended_message="${extended_message}
 
-...gekürzt - vollständige Logs auf Server"
+...Nachricht gekürzt - Details via SSH"
     fi
     
     # Sende mit bewährter Methode
@@ -242,7 +248,10 @@ ${error_context}
         --max-time 15 \
         -d "chat_id=${TELEGRAM_CHAT}" \
         -d "text=${extended_message}" \
-        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>/dev/null)
+        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    
+    # Debug: Zeige curl-Ergebnis
+    log "DEBUG: Curl-Ergebnis: ${result}"
     
     if echo "${result}" | grep -q '"ok":true'; then
         local message_id
@@ -250,20 +259,22 @@ ${error_context}
         log "Erweiterte Telegram-Nachricht erfolgreich gesendet (ID: ${message_id})"
         return 0
     else
-        # Fallback: Kurze Nachricht
-        log "Erweiterte Nachricht fehlgeschlagen, sende Fallback..."
-        log "Fehler-Details: ${result}"
+        # Detailliertes Fehler-Logging
+        log "Telegram-API Fehler: ${result}"
         
+        # Fallback: Sehr kurze Nachricht
+        log "Sende Fallback-Nachricht..."
         local fallback_msg="${icon} ${emoji}
 🌍 ${COUNTRY} | ${PUBLIC_IP}
 🏠 ${HOSTNAME_NEW}
-📋 ${title}: ${message}"
+📋 ${title}: ${message}
+🔗 https://ipinfo.io/${PUBLIC_IP}"
         
         local fallback_result
         fallback_result=$(curl -s -X POST \
             -d "chat_id=${TELEGRAM_CHAT}" \
             -d "text=${fallback_msg}" \
-            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>/dev/null)
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
         
         if echo "${fallback_result}" | grep -q '"ok":true'; then
             log "Fallback-Nachricht erfolgreich gesendet"
