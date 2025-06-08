@@ -2050,7 +2050,7 @@ WantedBy=multi-user.target
 EOF
     
     # Auto-Update Timer (Sonntag 03:00 mit Randomisierung)
-    local random_delay=$((RANDOM % 3600))  # 0-60 Minuten
+    local random_delay=$((RANDOM % 43200))  # 0-720 Minuten
     cat > "${SYSTEMD_TIMER_PATH}" << EOF
 [Unit]
 Description=Weekly Globalping Installation Auto-Update and Maintenance
@@ -2086,7 +2086,7 @@ setup_enhanced_crontab() {
     
     log "Richte erweiterte Crontab ein"
     
-    local random_hour=$((3 + RANDOM % 2))  # 3-4 Uhr
+    local random_hour=$((3 + RANDOM % 13))
     local random_minute=$((RANDOM % 60))   # 0-59 Minuten
     
     local crontab_entry="${random_minute} ${random_hour} * * 0 ${SCRIPT_PATH} --auto-weekly >/dev/null 2>&1"
