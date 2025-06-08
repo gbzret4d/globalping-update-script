@@ -79,7 +79,16 @@ get_enhanced_system_info() {
     [[ -z "${PROVIDER}" ]] && PROVIDER="unknown"
     
     # Hostname ermitteln
-    HOSTNAME_NEW=$(hostname 2>/dev/null || echo "unknown")
+    # Hostname ermitteln - INTELLIGENTER HOSTNAME
+if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
+    HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
+    # Bereinige Hostname (nur Kleinbuchstaben, Zahlen, Bindestriche)
+    HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-\|-$//g')
+    # Maximale Länge 63 Zeichen
+    HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | cut -c1-63)
+else
+    HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-$(date +%s)")
+fi
     
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
 }
@@ -3389,8 +3398,17 @@ enhanced_main() {
     enhanced_log "INFO" "=============================================="
     
     # Erfolgreiche Installation-Benachrichtigung
-    if [[ "${WEEKLY_MODE}" != "true" ]]; then
-        enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
+   if [[ "${WEEKLY_MODE}" != "true" ]]; then
+    enhanced_log "INFO" "Sende install_success Nachricht (WEEKLY_MODE=${WEEKLY_MODE})"
+    enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
+
+Konfigurierte Features:
+${ADOPTION_TOKEN:+✓ Globalping-Probe}
+${TELEGRAM_TOKEN:+✓ Telegram-Benachrichtigungen}
+${SSH_KEY:+✓ SSH-Zugang}
+✓ Automatische Wartung
+✓ Intelligente Swap-Konfiguration"
+fi
 
 Konfigurierte Features:
 ${ADOPTION_TOKEN:+✓ Globalping-Probe}
