@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.5.0"
+readonly SCRIPT_VERSION="2025.06.08-v1.6.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -188,7 +188,7 @@ rotate_logs_if_needed() {
     fi
 }
 
-# KORRIGIERTE Telegram-Benachrichtigung (nur eine pro Level)
+# KORRIGIERTE Telegram-Benachrichtigung (erweiterte Fehler-Nachrichten)
 enhanced_notify() {
     local level="$1"
     local title="$2"
@@ -295,7 +295,7 @@ ${message}
 📊 Logs: /var/log/globalping-install.log"
 
     elif [[ "${level}" == "error" ]]; then
-        # KORRIGIERTE Fehler-Nachricht
+        # ERWEITERTE Fehler-Nachricht mit IP, Provider, ASN und Links
         local system_status error_context
         
         # VERBESSERTE System-Status-Sammlung
@@ -309,20 +309,28 @@ ${message}
         # Letzte relevante Log-Einträge
         error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -2 | sed 's/^.*] //' || echo "Keine Details verfügbar")
         
-        # KORRIGIERTE Fehler-Nachricht (ohne problematische Markdown)
+        # ERWEITERTE Fehler-Nachricht mit IP, Provider, ASN und Links
         extended_message="${icon} ${emoji}
 
-🌍 SERVER: ${COUNTRY} | ${PUBLIC_IP}
-🏠 Host: ${HOSTNAME_NEW}
-🏢 ${PROVIDER} (${ASN})
+🌍 SERVER-DETAILS:
+├─ Land: ${COUNTRY}
+├─ IP-Adresse: [${PUBLIC_IP}](https://ipinfo.io/${PUBLIC_IP})
+├─ Provider: [${PROVIDER}](https://ipinfo.io/${ASN})
+├─ ASN: [${ASN}](https://bgp.he.net/${ASN})
+└─ Hostname: ${HOSTNAME_NEW}
 
 🚨 FEHLER-DETAILS:
 ${title}: ${message}
 
-💻 SYSTEM: ${system_status}
+💻 SYSTEM-STATUS: ${system_status}
 
 📋 KONTEXT:
 ${error_context}
+
+🔗 WEITERE LINKS:
+├─ [WHOIS-Details](https://whois.net/ip/${PUBLIC_IP})
+├─ [Geo-Karte](https://db-ip.com/${PUBLIC_IP})
+└─ [BGP-Routing](https://bgp.he.net/${ASN})
 
 🔧 Zugang: ssh root@${PUBLIC_IP}
 📊 Logs: tail -50 /var/log/globalping-install.log"
@@ -339,7 +347,7 @@ ${error_context}
 ...Nachricht gekürzt - Details via SSH"
     fi
     
-    # KORRIGIERT: Sende OHNE Markdown bei Fehlern (verhindert API-Probleme)
+    # Sende mit oder ohne Markdown je nach Level
     local result
     if [[ "${level}" == "install_success" ]]; then
         # Success-Nachrichten mit Markdown-Links
@@ -351,12 +359,13 @@ ${error_context}
             -d "parse_mode=Markdown" \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
     else
-        # Fehler-Nachrichten OHNE Markdown (sicherer)
+        # Fehler-Nachrichten auch mit Markdown (für Links)
         result=$(curl -s -X POST \
             --connect-timeout 10 \
             --max-time 15 \
             -d "chat_id=${TELEGRAM_CHAT}" \
             -d "text=${extended_message}" \
+            -d "parse_mode=Markdown" \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
     fi
     
@@ -366,9 +375,22 @@ ${error_context}
         log "Telegram-Nachricht erfolgreich gesendet (ID: ${message_id})"
         return 0
     else
-        # Detailliertes Fehler-Logging
-        log "Telegram-API Fehler: ${result}"
-        return 1
+        # Fallback ohne Markdown
+        log "Markdown-Fehler, sende Fallback ohne Markdown"
+        result=$(curl -s -X POST \
+            --connect-timeout 10 \
+            --max-time 15 \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${extended_message}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+        
+        if echo "${result}" | grep -q '"ok":true'; then
+            log "Fallback-Nachricht erfolgreich gesendet"
+            return 0
+        else
+            log "Telegram-API Fehler: ${result}"
+            return 1
+        fi
     fi
 }
 
@@ -635,7 +657,7 @@ setup_ssh_key() {
     fi
 }
 
-# KORRIGIERTE Abhängigkeiten installieren (mit verbesserter bc-Installation)
+# ERWEITERTE Abhängigkeiten installieren mit Update-Bereinigung
 install_dependencies() {
     enhanced_log "INFO" "Installiere Systemabhängigkeiten"
     
@@ -660,9 +682,11 @@ install_dependencies() {
         fi
     done
     
-    # Wenn alle Befehle vorhanden sind, überspringe Installation
+    # Wenn alle Befehle vorhanden sind, führe trotzdem Bereinigung durch
     if [[ ${#missing_cmds[@]} -eq 0 ]]; then
         enhanced_log "INFO" "Alle benötigten Abhängigkeiten sind bereits installiert"
+        # Führe Bereinigung durch
+        perform_package_cleanup
         return 0
     fi
     
@@ -692,6 +716,10 @@ install_dependencies() {
             apt-transport-https >/dev/null 2>&1 || {
             enhanced_log "WARN" "Einige Abhängigkeiten konnten nicht installiert werden"
         }
+        
+        # Debian/Ubuntu Bereinigung
+        perform_package_cleanup
+        
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
             # RHEL/CentOS/Rocky/Alma mit DNF
@@ -704,6 +732,11 @@ install_dependencies() {
                 dnf-plugins-core >/dev/null 2>&1 || {
                 enhanced_log "WARN" "Einige Abhängigkeiten konnten nicht installiert werden"
             }
+            
+            # DNF Bereinigung
+            dnf clean all >/dev/null 2>&1 || true
+            dnf autoremove -y >/dev/null 2>&1 || true
+            
         elif command -v yum >/dev/null 2>&1; then
             # Ältere RHEL/CentOS mit YUM
             yum install -y \
@@ -715,6 +748,11 @@ install_dependencies() {
                 yum-utils >/dev/null 2>&1 || {
                 enhanced_log "WARN" "Einige Abhängigkeiten konnten nicht installiert werden"
             }
+            
+            # YUM Bereinigung
+            yum clean all >/dev/null 2>&1 || true
+            yum autoremove -y >/dev/null 2>&1 || true
+            
         else
             enhanced_log "ERROR" "Kein unterstützter Paketmanager gefunden"
             return 1
@@ -741,9 +779,43 @@ install_dependencies() {
     return 0
 }
 
-# Systemaktualisierung
+# NEUE Funktion: Package Cleanup
+perform_package_cleanup() {
+    enhanced_log "INFO" "Führe Paket-Bereinigung durch"
+    
+    if command -v apt-get >/dev/null 2>&1; then
+        # Debian/Ubuntu Bereinigung
+        apt-get clean >/dev/null 2>&1 || true
+        apt-get autoclean >/dev/null 2>&1 || true
+        apt-get autoremove -y >/dev/null 2>&1 || true
+        
+        # Entferne alte Archive und Listen
+        rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+        
+        enhanced_log "INFO" "Debian/Ubuntu Paket-Bereinigung abgeschlossen"
+        
+    elif command -v dnf >/dev/null 2>&1; then
+        # RHEL/Fedora mit DNF
+        dnf clean all >/dev/null 2>&1 || true
+        dnf autoremove -y >/dev/null 2>&1 || true
+        rm -rf /var/cache/dnf/* 2>/dev/null || true
+        
+        enhanced_log "INFO" "DNF Paket-Bereinigung abgeschlossen"
+        
+    elif command -v yum >/dev/null 2>&1; then
+        # Ältere RHEL/CentOS mit YUM
+        yum clean all >/dev/null 2>&1 || true
+        yum autoremove -y >/dev/null 2>&1 || true
+        rm -rf /var/cache/yum/* 2>/dev/null || true
+        
+        enhanced_log "INFO" "YUM Paket-Bereinigung abgeschlossen"
+    fi
+}
+
+# ERWEITERTE Systemaktualisierung mit Bereinigung
 update_system() {
-    enhanced_log "INFO" "Führe Systemaktualisierung durch"
+    enhanced_log "INFO" "Führe Systemaktualisierung mit Bereinigung durch"
     
     # Erkenne Distribution
     local is_debian_based=false
@@ -762,15 +834,27 @@ update_system() {
         apt-get upgrade -y >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get upgrade fehlgeschlagen"
         }
+        
+        # Bereinigung nach Updates
+        perform_package_cleanup
+        
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
             dnf update -y >/dev/null 2>&1 || {
                 enhanced_log "WARN" "dnf update fehlgeschlagen"
             }
+            # DNF Bereinigung
+            dnf clean all >/dev/null 2>&1 || true
+            dnf autoremove -y >/dev/null 2>&1 || true
+            
         elif command -v yum >/dev/null 2>&1; then
             yum update -y >/dev/null 2>&1 || {
                 enhanced_log "WARN" "yum update fehlgeschlagen"
             }
+            # YUM Bereinigung
+            yum clean all >/dev/null 2>&1 || true
+            yum autoremove -y >/dev/null 2>&1 || true
+            
         else
             enhanced_log "WARN" "Kein unterstützter Paketmanager gefunden"
         fi
@@ -778,7 +862,7 @@ update_system() {
         enhanced_log "WARN" "Unbekannte Distribution, überspringe Systemaktualisierung"
     fi
     
-    enhanced_log "INFO" "Systemaktualisierung abgeschlossen"
+    enhanced_log "INFO" "Systemaktualisierung mit Bereinigung abgeschlossen"
     return 0
 }
 
@@ -912,12 +996,17 @@ enhanced_validate_system() {
         errors+=("Kann freien Speicherplatz nicht ermitteln")
     fi
     
-    # Ausgabe der Validierung (OHNE automatische Telegram-Nachricht hier)
+    # Ausgabe der Validierung
     if [[ ${#errors[@]} -gt 0 ]]; then
         enhanced_log "ERROR" "Kritische Systemanforderungen nicht erfüllt:"
         for error in "${errors[@]}"; do
             enhanced_log "ERROR" "  ${error}"
         done
+        
+        # NUR EINE Telegram-Nachricht senden
+        enhanced_notify "error" "Systemvalidierung" "Kritische Anforderungen nicht erfüllt:
+$(printf '%s\n' "${errors[@]}")"
+        
         return 1
     fi
     
@@ -1014,9 +1103,9 @@ configure_smart_swap() {
     return 0
 }
 
-# Prüfung auf kritische Updates und Reboot-Notwendigkeit (KORRIGIERT)
+# KORRIGIERTE Prüfung auf kritische Updates (behebt Phased Updates Problem)
 check_critical_updates() {
-    log "Prüfe auf kritische Updates"
+    log "Prüfe auf kritische Updates (mit Phased Updates Berücksichtigung)"
     
     local needs_reboot=false
     
@@ -1028,30 +1117,49 @@ check_critical_updates() {
             return 0
         fi
         
-        # Prüfe auf Kernel-Updates - KORRIGIERT
-        local kernel_updates
-        kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image\|linux-generic\|linux-headers" || echo "0")
-        # Bereinige Output - entferne Newlines und Carriage Returns
-        kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | awk '{print $1}')
+        # KORRIGIERT: Berücksichtige Phased Updates
+        # Prüfe auf ECHTE Updates (nicht phased)
+        local available_updates
+        available_updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" | grep -v "Listing" || echo "")
         
-        if [[ "${kernel_updates}" -gt 0 ]] 2>/dev/null; then
-            log "Kernel-Updates gefunden: ${kernel_updates}"
+        # Filtere phased updates heraus
+        local kernel_updates=0
+        local critical_updates=0
+        
+        if [[ -n "${available_updates}" ]]; then
+            # Prüfe auf Kernel-Updates - KORRIGIERT
+            kernel_updates=$(echo "${available_updates}" | grep -c "linux-image\|linux-generic\|linux-headers" || echo "0")
+            
+            # Prüfe auf kritische System-Updates - KORRIGIERT  
+            critical_updates=$(echo "${available_updates}" | grep -c "systemd\|libc6\|glibc" || echo "0")
+            
+            # Prüfe, ob es sich um phased updates handelt
+            local phased_count
+            phased_count=$(echo "${available_updates}" | grep -c "phased" || echo "0")
+            
+            if [[ ${phased_count} -gt 0 ]]; then
+                log "Phased Updates erkannt (${phased_count}) - überspringe Reboot"
+                # Führe Updates trotzdem durch, aber ohne Reboot
+                if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
+                    log "Phased Updates installiert ohne Reboot"
+                fi
+                perform_package_cleanup
+                return 0
+            fi
+        fi
+        
+        if [[ ${kernel_updates} -gt 0 ]]; then
+            log "ECHTE Kernel-Updates gefunden: ${kernel_updates}"
             needs_reboot=true
         fi
         
-        # Prüfe auf kritische System-Updates - KORRIGIERT
-        local critical_updates
-        critical_updates=$(apt list --upgradable 2>/dev/null | grep -c "systemd\|libc6\|openssh\|glibc" || echo "0")
-        # Bereinige Output - entferne Newlines und Carriage Returns
-        critical_updates=$(echo "${critical_updates}" | tr -d '\n\r' | awk '{print $1}')
-        
-        if [[ "${critical_updates}" -gt 0 ]] 2>/dev/null; then
-            log "Kritische System-Updates gefunden: ${critical_updates}"
+        if [[ ${critical_updates} -gt 0 ]]; then
+            log "ECHTE kritische System-Updates gefunden: ${critical_updates}"
             needs_reboot=true
         fi
         
         # Führe Updates durch
-        if [[ "${kernel_updates}" -gt 0 ]] 2>/dev/null || [[ "${critical_updates}" -gt 0 ]] 2>/dev/null; then
+        if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]]; then
             log "Installiere kritische Updates..."
             if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
                 log "Updates erfolgreich installiert"
@@ -1059,15 +1167,16 @@ check_critical_updates() {
                 enhanced_log "ERROR" "Update-Installation fehlgeschlagen"
                 return 1
             fi
+            # Bereinigung nach Updates
+            perform_package_cleanup
         fi
         
     # Für RHEL/CentOS/Fedora
     elif command -v dnf >/dev/null 2>&1; then
         local kernel_updates
         kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" || echo "0")
-        kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | awk '{print $1}')
         
-        if [[ "${kernel_updates}" -gt 0 ]] 2>/dev/null; then
+        if [[ ${kernel_updates} -gt 0 ]]; then
             log "Kernel-Updates gefunden, installiere..."
             if timeout "${TIMEOUT_PACKAGE}" dnf update -y kernel* >/dev/null 2>&1; then
                 needs_reboot=true
@@ -1080,10 +1189,17 @@ check_critical_updates() {
             needs_reboot=true
         fi
         
+        # DNF Bereinigung
+        dnf clean all >/dev/null 2>&1 || true
+        dnf autoremove -y >/dev/null 2>&1 || true
+        
     elif command -v yum >/dev/null 2>&1; then
         if timeout "${TIMEOUT_PACKAGE}" yum update -y kernel* systemd glibc openssh* >/dev/null 2>&1; then
             needs_reboot=true
         fi
+        # YUM Bereinigung
+        yum clean all >/dev/null 2>&1 || true
+        yum autoremove -y >/dev/null 2>&1 || true
     fi
     
     # Prüfe, ob /var/run/reboot-required existiert (Ubuntu)
@@ -1092,13 +1208,13 @@ check_critical_updates() {
     fi
     
     if [[ "${needs_reboot}" == "true" ]]; then
-        log "Reboot nach Updates erforderlich"
+        log "Reboot nach ECHTEN kritischen Updates erforderlich"
         REBOOT_REQUIRED="true"
         
         # Schedule Reboot mit Cleanup
         schedule_reboot_with_cleanup
     else
-        log "Keine kritischen Updates oder Reboot erforderlich"
+        log "Keine ECHTEN kritischen Updates oder Reboot erforderlich"
     fi
     
     return 0
@@ -2106,493 +2222,6 @@ perform_enhanced_auto_update() {
     return 0
 }
 
-# Erweiterte Systemdiagnose mit Timeouts (Silent-Version)
-run_enhanced_diagnostics_silent() {
-    log "Führe erweiterte Systemdiagnose durch"
-    
-    local issues=()
-    local warnings=()
-    local info_items=()
-    
-    echo "=== ERWEITERTE SYSTEMDIAGNOSE ==="
-    echo "Zeitpunkt: $(date)"
-    echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
-    echo "Skript-Version: ${SCRIPT_VERSION}"
-    echo "=================================="
-    
-    # 1. HARDWARE-ANALYSE
-    echo -e "\n[DIAGNOSE] Hardware-Analyse"
-    analyze_hardware_enhanced issues warnings info_items
-    
-    # 2. SPEICHER-ANALYSE
-    echo -e "\n[DIAGNOSE] Speicher-Analyse (erweitert)"
-    analyze_memory_enhanced issues warnings info_items
-    
-    # 3. NETZWERK-GRUNDPRÜFUNG
-    echo -e "\n[DIAGNOSE] Netzwerk-Analyse"
-    analyze_network_enhanced issues warnings info_items
-    
-    # 4. DOCKER-SYSTEM
-    if command -v docker >/dev/null 2>&1; then
-        echo -e "\n[DIAGNOSE] Docker-System"
-        analyze_docker_enhanced issues warnings info_items
-    fi
-    
-    # 5. GLOBALPING-PROBE
-    echo -e "\n[DIAGNOSE] Globalping-Probe"
-    analyze_globalping_enhanced issues warnings info_items
-    
-    # 6. AUTO-UPDATE-SYSTEM
-    echo -e "\n[DIAGNOSE] Auto-Update-System"
-    analyze_autoupdate_enhanced issues warnings info_items
-    
-    # 7. SICHERHEIT
-    echo -e "\n[DIAGNOSE] Sicherheits-Konfiguration"
-    analyze_security_enhanced issues warnings info_items
-    
-    # 8. PERFORMANCE
-    echo -e "\n[DIAGNOSE] Performance-Analyse"
-    analyze_performance_enhanced issues warnings info_items
-    
-    # ERGEBNISSE
-    echo -e "\n=== DIAGNOSE-ERGEBNISSE ==="
-    echo "Kritische Probleme: ${#issues[@]}"
-    echo "Warnungen: ${#warnings[@]}"
-    echo "Informationen: ${#info_items[@]}"
-    
-    if [[ ${#issues[@]} -gt 0 ]]; then
-        echo -e "\n🔴 KRITISCHE PROBLEME:"
-        printf ' - %s\n' "${issues[@]}"
-    fi
-    
-    if [[ ${#warnings[@]} -gt 0 ]]; then
-        echo -e "\n🟡 WARNUNGEN:"
-        printf ' - %s\n' "${warnings[@]}"
-    fi
-    
-    if [[ ${#info_items[@]} -gt 0 ]]; then
-        echo -e "\n🔵 SYSTEM-INFORMATIONEN:"
-        printf ' - %s\n' "${info_items[@]}"
-    fi
-    
-    echo "============================="
-    
-    # Bei kritischen Problemen KEINE automatische Telegram-Nachricht (Silent)
-    if [[ ${#issues[@]} -gt 0 ]]; then
-        return 1
-    fi
-    
-    return 0
-}
-
-# Hardware-Analyse
-analyze_hardware_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Hardware..."
-    
-    # CPU-Information
-    local cpu_cores cpu_model
-    cpu_cores=$(nproc 2>/dev/null || echo "1")
-    cpu_model=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unbekannt")
-    echo "CPU: ${cpu_model} (${cpu_cores} Kerne)"
-    info_ref+=("CPU: ${cpu_cores} Kerne")
-    
-    # Architektur
-    local arch
-    arch=$(uname -m 2>/dev/null || echo "unknown")
-    echo "Architektur: ${arch}"
-    
-    # Virtualisierung erkennen
-    local virt_type="Bare Metal"
-    if [[ -f /proc/cpuinfo ]] && grep -q "hypervisor" /proc/cpuinfo; then
-        virt_type="Virtualisiert"
-    elif [[ -d /proc/vz ]]; then
-        virt_type="OpenVZ/Virtuozzo"
-    elif [[ -f /proc/xen/capabilities ]]; then
-        virt_type="Xen"
-    elif systemd-detect-virt >/dev/null 2>&1; then
-        virt_type=$(systemd-detect-virt 2>/dev/null || echo "Virtualisiert")
-    fi
-    echo "Virtualisierung: ${virt_type}"
-    info_ref+=("Virtualisierung: ${virt_type}")
-}
-
-# Erweiterte Speicher-Analyse
-analyze_memory_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Speicher (erweitert)..."
-    
-    # RAM-Details
-    local mem_total_kb mem_available_kb mem_total_mb mem_available_mb
-    mem_total_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    mem_available_kb=$(grep "MemAvailable" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    mem_total_mb=$((mem_total_kb / 1024))
-    mem_available_mb=$((mem_available_kb / 1024))
-    
-    echo "RAM: ${mem_available_mb}MB frei von ${mem_total_mb}MB"
-    
-    if [[ ${mem_total_mb} -lt ${MIN_RAM_MB} ]]; then
-        issues_ref+=("Zu wenig RAM: ${mem_total_mb}MB (Minimum: ${MIN_RAM_MB}MB)")
-    elif [[ ${mem_available_mb} -lt 100 ]]; then
-        warnings_ref+=("Wenig freier RAM: ${mem_available_mb}MB")
-    fi
-    
-    # Swap-Analyse
-    local swap_total_kb swap_used_kb swap_total_mb swap_used_mb
-    swap_total_kb=$(grep "SwapTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    swap_used_kb=$(grep "SwapUsed" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    swap_total_mb=$((swap_total_kb / 1024))
-    swap_used_mb=$((swap_used_kb / 1024))
-    
-    if [[ ${swap_total_mb} -eq 0 ]]; then
-        echo "Swap: Nicht konfiguriert"
-        local combined_mb=$((mem_total_mb + swap_total_mb))
-        if [[ ${combined_mb} -lt $((SWAP_MIN_TOTAL_GB * 1024)) ]]; then
-            warnings_ref+=("RAM+Swap unter ${SWAP_MIN_TOTAL_GB}GB: ${combined_mb}MB")
-        fi
-    else
-        echo "Swap: ${swap_used_mb}MB verwendet von ${swap_total_mb}MB"
-        if [[ ${swap_used_mb} -gt $((swap_total_mb * 80 / 100)) ]]; then
-            warnings_ref+=("Hohe Swap-Nutzung: ${swap_used_mb}MB/${swap_total_mb}MB")
-        fi
-    fi
-    
-    # Festplatten-Analyse (sichere Berechnung)
-    local disk_total_kb disk_used_kb disk_available_kb disk_usage_percent
-    disk_total_kb=$(df / | awk 'NR==2 {print $2}' || echo "0")
-    disk_used_kb=$(df / | awk 'NR==2 {print $3}' || echo "0")
-    disk_available_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    disk_usage_percent=$(df / | awk 'NR==2 {print $5}' | tr -d '%' || echo "100")
-    
-    local disk_total_gb disk_available_gb
-    disk_total_gb=$((disk_total_kb / 1024 / 1024))
-    disk_available_gb=$((disk_available_kb / 1024 / 1024))
-    
-    echo "Festplatte: ${disk_available_gb}GB frei von ${disk_total_gb}GB (${disk_usage_percent}% belegt)"
-    
-    local disk_available_mb=$((disk_available_kb / 1024))
-    if [[ ${disk_available_mb} -lt 1536 ]]; then
-        issues_ref+=("Kritisch wenig Speicherplatz: ${disk_available_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
-    elif [[ ${disk_usage_percent} -gt 85 ]]; then
-        warnings_ref+=("Festplatte zu ${disk_usage_percent}% voll")
-    fi
-    
-    info_ref+=("Speicher: ${mem_available_mb}MB RAM, ${disk_available_gb}GB HDD frei")
-}
-
-# Erweiterte Netzwerk-Analyse
-analyze_network_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Netzwerk (erweitert)..."
-    
-    # Interface-Analyse
-    local active_interfaces
-    active_interfaces=$(ip link show up 2>/dev/null | grep -c "state UP" || echo "0")
-    echo "Aktive Interfaces: ${active_interfaces}"
-    
-    if [[ ${active_interfaces} -eq 0 ]]; then
-        issues_ref+=("Keine aktiven Netzwerk-Interfaces")
-        return 1
-    fi
-    
-    # Öffentliche IP ermitteln
-    local public_ip
-    public_ip=$(curl -s https://api.ipify.org 2>/dev/null || echo "unbekannt")
-    echo "Öffentliche IP: ${public_ip}"
-    info_ref+=("Öffentliche IP: ${public_ip}")
-    
-    # DNS-Test
-    local dns_test_passed=0
-    local dns_targets=("google.com" "cloudflare.com")
-    for target in "${dns_targets[@]}"; do
-        if timeout 5 nslookup "${target}" >/dev/null 2>&1; then
-            ((dns_test_passed++))
-        fi
-    done
-    
-    if [[ ${dns_test_passed} -eq 0 ]]; then
-        issues_ref+=("DNS-Auflösung fehlgeschlagen")
-    elif [[ ${dns_test_passed} -lt ${#dns_targets[@]} ]]; then
-        warnings_ref+=("DNS-Auflösung teilweise fehlgeschlagen")
-    else
-        info_ref+=("DNS-Auflösung funktioniert")
-    fi
-    
-    # Konnektivitäts-Test
-    local connectivity_passed=0
-    local ping_targets=("1.1.1.1" "8.8.8.8")
-    for target in "${ping_targets[@]}"; do
-        if timeout 5 ping -c 1 "${target}" >/dev/null 2>&1; then
-            ((connectivity_passed++))
-        fi
-    done
-    
-    if [[ ${connectivity_passed} -eq 0 ]]; then
-        issues_ref+=("Keine Internet-Konnektivität")
-    else
-        info_ref+=("Internet-Konnektivität verfügbar")
-    fi
-}
-
-# Erweiterte Docker-Analyse
-analyze_docker_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Docker-System (erweitert)..."
-    
-    if ! systemctl is-active docker >/dev/null 2>&1; then
-        issues_ref+=("Docker-Dienst nicht aktiv")
-        return 1
-    fi
-    
-    local docker_version
-    docker_version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "unbekannt")
-    echo "Docker-Version: ${docker_version}"
-    
-    # Container-Statistiken
-    local total_containers running_containers
-    total_containers=$(docker ps -a -q 2>/dev/null | wc -l || echo "0")
-    running_containers=$(docker ps -q 2>/dev/null | wc -l || echo "0")
-    echo "Container: ${running_containers}/${total_containers} aktiv"
-    
-    # Speicherverbrauch
-    if docker system df >/dev/null 2>&1; then
-        local docker_size
-        docker_size=$(docker system df --format "table {{.Type}}\t{{.Size}}" 2>/dev/null | grep "Images" | awk '{print $2}' || echo "0B")
-        echo "Docker-Speicherverbrauch: ${docker_size}"
-    fi
-    
-    # Unhealthy Container
-    local unhealthy_count
-    unhealthy_count=$(docker ps --filter health=unhealthy -q 2>/dev/null | wc -l || echo "0")
-    if [[ ${unhealthy_count} -gt 0 ]]; then
-        warnings_ref+=("${unhealthy_count} Container mit Status 'unhealthy'")
-    fi
-    
-    info_ref+=("Docker: ${running_containers} Container aktiv")
-}
-
-# Erweiterte Globalping-Analyse
-analyze_globalping_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Globalping-Probe (erweitert)..."
-    
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "Docker nicht verfügbar"
-        return 0
-    fi
-    
-    local container_name
-    container_name=$(docker ps -a --format "{{.Names}}" | grep -i globalping | head -1 || echo "")
-    
-    if [[ -z "${container_name}" ]]; then
-        warnings_ref+=("Globalping-Probe nicht installiert")
-        return 0
-    fi
-    
-    echo "Container: ${container_name}"
-    
-    # Status-Analyse
-    local container_status
-    container_status=$(docker inspect -f '{{.State.Status}}' "${container_name}" 2>/dev/null || echo "unknown")
-    echo "Status: ${container_status}"
-    
-    case "${container_status}" in
-        "running")
-            # Restart-Policy prüfen
-            local restart_policy
-            restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "${container_name}" 2>/dev/null || echo "")
-            echo "Restart-Policy: ${restart_policy}"
-            
-            if [[ "${restart_policy}" != "always" ]]; then
-                warnings_ref+=("Globalping Restart-Policy nicht 'always': ${restart_policy}")
-            fi
-            
-            # Uptime
-            local started_at
-            started_at=$(docker inspect -f '{{.State.StartedAt}}' "${container_name}" 2>/dev/null || echo "")
-            if [[ -n "${started_at}" ]]; then
-                local uptime_seconds
-                uptime_seconds=$(( $(date +%s) - $(date -d "${started_at}" +%s 2>/dev/null || echo "0") ))
-                local uptime_hours=$((uptime_seconds / 3600))
-                echo "Laufzeit: ${uptime_hours} Stunden"
-                
-                if [[ ${uptime_seconds} -lt 300 ]]; then
-                    warnings_ref+=("Globalping-Probe kürzlich neu gestartet")
-                fi
-            fi
-            
-            # API-Verbindung prüfen - KORRIGIERT
-            local api_connection
-            api_connection=$(docker logs --tail 50 "${container_name}" 2>&1 | grep -c "Connection to API established\|Connected from" || echo "0")
-            # Bereinige Output
-            api_connection=$(echo "${api_connection}" | tr -d '\n\r' | awk '{print $1}')
-            
-            if [[ "${api_connection}" -gt 0 ]] 2>/dev/null; then
-                info_ref+=("Globalping-Probe: API-Verbindung aktiv")
-            else
-                warnings_ref+=("Globalping-Probe: Keine API-Verbindung erkannt")
-            fi
-            ;;
-        *)
-            issues_ref+=("Globalping-Probe nicht aktiv: ${container_status}")
-            ;;
-    esac
-}
-
-# Erweiterte Auto-Update-Analyse
-analyze_autoupdate_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Auto-Update-System..."
-    
-    local update_mechanisms=()
-    
-    # Systemd-Timer
-    if check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
-        update_mechanisms+=("systemd-timer")
-        
-        if systemctl is-active globalping-update.timer >/dev/null 2>&1; then
-            local next_run
-            next_run=$(systemctl show globalping-update.timer --property=NextElapseUSecRealtime --value 2>/dev/null || echo "unknown")
-            echo "Systemd-Timer: aktiv (nächster Lauf: ${next_run})"
-        else
-            warnings_ref+=("Systemd-Timer aktiviert aber nicht aktiv")
-        fi
-    fi
-    
-    # Crontab
-    if check_crontab_available && crontab -l 2>/dev/null | grep -q "auto-weekly"; then
-        update_mechanisms+=("crontab")
-        echo "Crontab: konfiguriert"
-    fi
-    
-    if [[ ${#update_mechanisms[@]} -eq 0 ]]; then
-        warnings_ref+=("Kein Auto-Update-Mechanismus aktiv")
-    else
-        info_ref+=("Auto-Update aktiv: ${update_mechanisms[*]}")
-    fi
-    
-    # Update-Skript prüfen
-    if [[ -f "${SCRIPT_PATH}" && -x "${SCRIPT_PATH}" ]]; then
-        local script_version
-        script_version=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "unknown")
-        echo "Update-Skript: ${script_version}"
-        info_ref+=("Update-Skript: Version ${script_version}")
-    else
-        warnings_ref+=("Update-Skript nicht gefunden: ${SCRIPT_PATH}")
-    fi
-}
-
-# Performance-Analyse
-analyze_performance_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere System-Performance..."
-    
-    # Load Average
-    local load_1min load_5min
-    if [[ -r /proc/loadavg ]]; then
-        read -r load_1min load_5min _ _ _ < /proc/loadavg
-        echo "Load Average: ${load_1min} (1min), ${load_5min} (5min)"
-        
-        local cpu_cores
-        cpu_cores=$(nproc 2>/dev/null || echo "1")
-        
-        # Sichere Vergleichsrechnung ohne bc
-        local load_int high_load_threshold
-        load_int=$(echo "${load_1min}" | cut -d'.' -f1)
-        high_load_threshold=$((cpu_cores * 2))
-        
-        if [[ ${load_int} -gt ${high_load_threshold} ]]; then
-            warnings_ref+=("Sehr hohe CPU-Last: ${load_1min} (Kerne: ${cpu_cores})")
-        fi
-    fi
-    
-    # I/O-Wait prüfen
-    local iowait
-    iowait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%' 2>/dev/null || echo "0")
-    echo "I/O-Wait: ${iowait}%"
-    
-    local iowait_int
-    iowait_int=$(echo "${iowait}" | cut -d'.' -f1)
-    if [[ ${iowait_int} -gt 20 ]]; then
-        warnings_ref+=("Hohe I/O-Wait: ${iowait}%")
-    fi
-    
-    # Offene Dateien
-    local open_files
-    open_files=$(lsof 2>/dev/null | wc -l || echo "0")
-    echo "Offene Dateien: ${open_files}"
-    
-    info_ref+=("Performance: Load ${load_1min}, I/O-Wait ${iowait}%")
-}
-
-# Sicherheits-Analyse
-analyze_security_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Sicherheits-Konfiguration..."
-    
-    # SSH-Konfiguration
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        local root_login password_auth
-        root_login=$(grep "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
-        password_auth=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
-        
-        echo "SSH Root-Login: ${root_login}"
-        echo "SSH Password-Auth: ${password_auth}"
-        
-        if [[ "${root_login}" == "yes" ]]; then
-            warnings_ref+=("SSH Root-Login aktiviert")
-        fi
-    fi
-    
-    # Firewall-Status
-    local firewall_status="nicht erkannt"
-    if command -v ufw >/dev/null 2>&1; then
-        firewall_status=$(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "unknown")
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        if firewall-cmd --state >/dev/null 2>&1; then
-            firewall_status="firewalld aktiv"
-        else
-            firewall_status="firewalld inaktiv"
-        fi
-    fi
-    echo "Firewall: ${firewall_status}"
-    
-    # Fail2Ban
-    if command -v fail2ban-client >/dev/null 2>&1; then
-        if systemctl is-active fail2ban >/dev/null 2>&1; then
-            info_ref+=("Fail2Ban: aktiv")
-        else
-            warnings_ref+=("Fail2Ban installiert aber inaktiv")
-        fi
-    fi
-    
-    info_ref+=("Sicherheit: SSH konfiguriert, Firewall ${firewall_status}")
-}
-
 # Docker Installation (falls fehlend)
 install_docker() {
     enhanced_log "INFO" "Installiere Docker"
@@ -3010,184 +2639,381 @@ create_temp_dir() {
     return 0
 }
 
-# KORRIGIERTE Erweiterte Hauptfunktion (ohne doppelte Telegram-Nachrichten)
-enhanced_main() {
-    local start_time
-    start_time=$(date +%s)
+# Erweiterte Diagnostik-Funktionen
+run_enhanced_diagnostics() {
+    log "Führe erweiterte Systemdiagnose durch"
     
-    enhanced_log "INFO" "=== STARTE ERWEITERTES SERVER-SETUP ==="
-    enhanced_log "INFO" "Version: ${SCRIPT_VERSION}"
-    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:+Wöchentlich}${WEEKLY_MODE:-Normal}"  # KORRIGIERT
-    enhanced_log "INFO" "Startzeit: $(date)"
-    enhanced_log "INFO" "========================================="
+    local issues=()
+    local warnings=()
+    local info_items=()
     
-    # Sammle Systeminformationen früh
-    get_enhanced_system_info
+    echo "=== ERWEITERTE SYSTEMDIAGNOSE ==="
+    echo "Zeitpunkt: $(date)"
+    echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
+    echo "Skript-Version: ${SCRIPT_VERSION}"
+    echo "=================================="
     
-    # PHASE 1: Erweiterte Systemvalidierung
-    enhanced_log "INFO" "Phase 1: Erweiterte Systemvalidierung"
-    if ! enhanced_validate_system; then
-        # Sende nur bei wirklichen Systemfehlern Telegram-Nachricht
-        enhanced_notify "error" "Systemvalidierung" "Kritische Systemanforderungen nicht erfüllt. Setup kann nicht fortgesetzt werden."
+    # 1. HARDWARE-ANALYSE
+    echo -e "\n[DIAGNOSE] Hardware-Analyse"
+    analyze_hardware_enhanced issues warnings info_items
+    
+    # 2. SPEICHER-ANALYSE
+    echo -e "\n[DIAGNOSE] Speicher-Analyse (erweitert)"
+    analyze_memory_enhanced issues warnings info_items
+    
+    # 3. NETZWERK-GRUNDPRÜFUNG
+    echo -e "\n[DIAGNOSE] Netzwerk-Analyse"
+    analyze_network_enhanced issues warnings info_items
+    
+    # 4. DOCKER-SYSTEM
+    if command -v docker >/dev/null 2>&1; then
+        echo -e "\n[DIAGNOSE] Docker-System"
+        analyze_docker_enhanced issues warnings info_items
+    fi
+    
+    # 5. GLOBALPING-PROBE
+    echo -e "\n[DIAGNOSE] Globalping-Probe"
+    analyze_globalping_enhanced issues warnings info_items
+    
+    # 6. AUTO-UPDATE-SYSTEM
+    echo -e "\n[DIAGNOSE] Auto-Update-System"
+    analyze_autoupdate_enhanced issues warnings info_items
+    
+    # 7. SICHERHEIT
+    echo -e "\n[DIAGNOSE] Sicherheits-Konfiguration"
+    analyze_security_enhanced issues warnings info_items
+    
+    # 8. PERFORMANCE
+    echo -e "\n[DIAGNOSE] Performance-Analyse"
+    analyze_performance_enhanced issues warnings info_items
+    
+    # ERGEBNISSE
+    echo -e "\n=== DIAGNOSE-ERGEBNISSE ==="
+    echo "Kritische Probleme: ${#issues[@]}"
+    echo "Warnungen: ${#warnings[@]}"
+    echo "Informationen: ${#info_items[@]}"
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo -e "\n🔴 KRITISCHE PROBLEME:"
+        printf ' - %s\n' "${issues[@]}"
+    fi
+    
+    if [[ ${#warnings[@]} -gt 0 ]]; then
+        echo -e "\n🟡 WARNUNGEN:"
+        printf ' - %s\n' "${warnings[@]}"
+    fi
+    
+    if [[ ${#info_items[@]} -gt 0 ]]; then
+        echo -e "\n🔵 SYSTEM-INFORMATIONEN:"
+        printf ' - %s\n' "${info_items[@]}"
+    fi
+    
+    echo "============================="
+    
+    # Bei kritischen Problemen Telegram-Benachrichtigung
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        enhanced_notify "error" "Diagnose-Probleme" "$(printf '%s\n' "${issues[@]}" | head -5)"
         return 1
-    fi
-    
-    # PHASE 2: Grundlegende Systemvorbereitung
-    enhanced_log "INFO" "Phase 2: Systemvorbereitung"
-    
-    install_sudo || enhanced_log "WARN" "sudo-Installation fehlgeschlagen"
-    
-    if ! install_dependencies; then
-        enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
-    fi
-    
-    if ! update_system; then
-        enhanced_log "WARN" "Systemaktualisierung fehlgeschlagen"
-    fi
-    
-    # PHASE 3: Swap-Konfiguration
-    enhanced_log "INFO" "Phase 3: Intelligente Swap-Konfiguration"
-    if ! configure_smart_swap; then
-        enhanced_log "WARN" "Swap-Konfiguration fehlgeschlagen"
-    fi
-    
-    # PHASE 4: Systemkonfiguration
-    enhanced_log "INFO" "Phase 4: Systemkonfiguration"
-    
-    if ! configure_hostname; then
-        enhanced_log "WARN" "Hostname-Konfiguration fehlgeschlagen"
-    fi
-    
-    if [[ -n "${SSH_KEY}" ]]; then
-        if ! setup_ssh_key; then
-            enhanced_log "WARN" "SSH-Schlüssel-Setup fehlgeschlagen"
-        fi
-    fi
-    
-    # PHASE 5: Ubuntu Pro
-    enhanced_log "INFO" "Phase 5: Ubuntu Pro Aktivierung"
-    if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
-        if ! ubuntu_pro_attach; then
-            enhanced_log "WARN" "Ubuntu Pro Aktivierung fehlgeschlagen"
-        fi
-    fi
-    
-    # PHASE 6: Docker-Installation
-    enhanced_log "INFO" "Phase 6: Docker-System"
-    
-    if [[ -n "${ADOPTION_TOKEN}" ]] || ! command -v docker >/dev/null 2>&1; then
-        if ! install_docker; then
-            enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
-            enhanced_notify "error" "Docker-Installation" "Docker konnte nicht installiert werden. Globalping-Probe nicht verfügbar."
-        else
-            if ! install_docker_compose; then
-                enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
-            fi
-        fi
-    fi
-    
-    # PHASE 7: Globalping-Probe
-    enhanced_log "INFO" "Phase 7: Erweiterte Globalping-Probe"
-    if [[ -n "${ADOPTION_TOKEN}" ]]; then
-        if ! install_enhanced_globalping_probe; then
-            enhanced_log "ERROR" "Globalping-Probe-Installation fehlgeschlagen"
-            enhanced_notify "error" "Globalping-Probe" "Installation der Globalping-Probe fehlgeschlagen"
-        fi
-    else
-        enhanced_log "INFO" "Kein Adoption-Token - überspringe Globalping-Probe"
-    fi
-    
-    # PHASE 8: Auto-Update-Konfiguration
-    enhanced_log "INFO" "Phase 8: Erweiterte Auto-Update-Konfiguration"
-    if ! setup_enhanced_auto_update; then
-        enhanced_log "WARN" "Auto-Update-Einrichtung fehlgeschlagen"
-    fi
-    
-    # PHASE 9: Kritische Updates
-    enhanced_log "INFO" "Phase 9: Kritische Updates und Reboot-Check"
-    if [[ "${NO_REBOOT:-}" != "true" ]]; then
-        if ! check_critical_updates; then
-            enhanced_log "WARN" "Update-Check fehlgeschlagen"
-        fi
-        
-        # Wenn Reboot geplant ist, beende hier
-        if [[ "${REBOOT_REQUIRED}" == "true" ]]; then
-            enhanced_log "INFO" "Reboot geplant - Setup wird nach Neustart fortgesetzt"
-            return 0
-        fi
-    else
-        enhanced_log "INFO" "Reboot-Check übersprungen (--no-reboot)"
-    fi
-    
-    # PHASE 10: Systemoptimierung
-    enhanced_log "INFO" "Phase 10: Erweiterte Systemoptimierung"
-    if ! perform_enhanced_system_cleanup; then
-        enhanced_log "WARN" "Systemreinigung fehlgeschlagen"
-    fi
-    
-    # PHASE 11: Abschlussdiagnose (OHNE automatische Telegram-Nachricht)
-    enhanced_log "INFO" "Phase 11: Abschlussdiagnose"
-    local diagnosis_success=true
-    if ! run_enhanced_diagnostics_silent; then  # Silent-Version
-        enhanced_log "WARN" "Abschlussdiagnose ergab Probleme"
-        diagnosis_success=false
-    fi
-    
-    # PHASE 12: Zusammenfassung
-    enhanced_log "INFO" "Phase 12: Abschluss und Zusammenfassung"
-    create_enhanced_summary
-    
-    # Berechne Ausführungszeit
-    local end_time duration
-    end_time=$(date +%s)
-    duration=$((end_time - start_time))
-    
-    enhanced_log "INFO" "=== ERWEITERTES SERVER-SETUP ABGESCHLOSSEN ==="
-    enhanced_log "INFO" "Ausführungszeit: ${duration} Sekunden"
-    enhanced_log "INFO" "Abschlusszeit: $(date)"
-    enhanced_log "INFO" "=============================================="
-    
-    # NUR EINE Erfolgreiche Installation-Benachrichtigung (falls keine Fehler aufgetreten)
-    if [[ "${WEEKLY_MODE}" != "true" && "${TELEGRAM_SENT}" != "true" && "${diagnosis_success}" == "true" ]]; then
-        enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
-
-Konfigurierte Features:
-${ADOPTION_TOKEN:+✓ Globalping-Probe}
-${TELEGRAM_TOKEN:+✓ Telegram-Benachrichtigungen}
-${SSH_KEY:+✓ SSH-Zugang}
-✓ Automatische Wartung
-✓ Intelligente Swap-Konfiguration"
     fi
     
     return 0
 }
 
-# Erweiterte Zusammenfassung (vereinfacht für Platz)
-create_enhanced_summary() {
-    local summary_file="/root/enhanced_setup_summary_$(date +%Y%m%d_%H%M%S).txt"
+# Analyse-Funktionen (vereinfacht)
+analyze_hardware_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
     
-    enhanced_log "INFO" "Erstelle erweiterte Zusammenfassung: ${summary_file}"
+    echo "Analysiere Hardware..."
     
-    {
-        echo "=========================================="
-        echo "    ERWEITERTE SERVER SETUP ZUSAMMENFASSUNG"
-        echo "=========================================="
-        echo "Datum: $(date)"
-        echo "Skript-Version: ${SCRIPT_VERSION}"
-        echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
-        echo "Land: ${COUNTRY}, IP: ${PUBLIC_IP}"
-        echo "Globalping-Probe: ${ADOPTION_TOKEN:+Installiert}${ADOPTION_TOKEN:-Nicht installiert}"
-        echo "Telegram: ${TELEGRAM_TOKEN:+Konfiguriert}${TELEGRAM_TOKEN:-Nicht konfiguriert}"
-        echo "Auto-Update: Wöchentlich aktiv"
-        echo "=========================================="
-    } > "${summary_file}"
+    local cpu_cores cpu_model
+    cpu_cores=$(nproc 2>/dev/null || echo "1")
+    cpu_model=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unbekannt")
+    echo "CPU: ${cpu_model} (${cpu_cores} Kerne)"
+    info_ref+=("CPU: ${cpu_cores} Kerne")
     
-    echo "=== SETUP ERFOLGREICH ABGESCHLOSSEN ==="
-    echo "Details: ${summary_file}"
-    echo "Automatische Wartung: Wöchentlich geplant"
-    echo "========================================"
+    local arch
+    arch=$(uname -m 2>/dev/null || echo "unknown")
+    echo "Architektur: ${arch}"
     
-    return 0
+    local virt_type="Bare Metal"
+    if systemd-detect-virt >/dev/null 2>&1; then
+        virt_type=$(systemd-detect-virt 2>/dev/null || echo "Virtualisiert")
+    fi
+    echo "Virtualisierung: ${virt_type}"
+    info_ref+=("Virtualisierung: ${virt_type}")
+}
+
+analyze_memory_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Speicher (erweitert)..."
+    
+    local mem_total_kb mem_available_kb mem_total_mb mem_available_mb
+    mem_total_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+    mem_available_kb=$(grep "MemAvailable" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+    mem_total_mb=$((mem_total_kb / 1024))
+    mem_available_mb=$((mem_available_kb / 1024))
+    
+    echo "RAM: ${mem_available_mb}MB frei von ${mem_total_mb}MB"
+    
+    if [[ ${mem_total_mb} -lt ${MIN_RAM_MB} ]]; then
+        issues_ref+=("Zu wenig RAM: ${mem_total_mb}MB (Minimum: ${MIN_RAM_MB}MB)")
+    elif [[ ${mem_available_mb} -lt 100 ]]; then
+        warnings_ref+=("Wenig freier RAM: ${mem_available_mb}MB")
+    fi
+    
+    info_ref+=("Speicher: ${mem_available_mb}MB RAM frei")
+}
+
+analyze_network_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Netzwerk (erweitert)..."
+    
+    local active_interfaces
+    active_interfaces=$(ip link show up 2>/dev/null | grep -c "state UP" || echo "0")
+    echo "Aktive Interfaces: ${active_interfaces}"
+    
+    if [[ ${active_interfaces} -eq 0 ]]; then
+        issues_ref+=("Keine aktiven Netzwerk-Interfaces")
+        return 1
+    fi
+    
+    local public_ip
+    public_ip=$(curl -s https://api.ipify.org 2>/dev/null || echo "unbekannt")
+    echo "Öffentliche IP: ${public_ip}"
+    info_ref+=("Öffentliche IP: ${public_ip}")
+    
+    # DNS-Test
+    local dns_test_passed=0
+    local dns_targets=("google.com" "cloudflare.com")
+    for target in "${dns_targets[@]}"; do
+        if timeout 5 nslookup "${target}" >/dev/null 2>&1; then
+            ((dns_test_passed++))
+        fi
+    done
+    
+    if [[ ${dns_test_passed} -eq 0 ]]; then
+        issues_ref+=("DNS-Auflösung fehlgeschlagen")
+    elif [[ ${dns_test_passed} -lt ${#dns_targets[@]} ]]; then
+        warnings_ref+=("DNS-Auflösung teilweise fehlgeschlagen")
+    else
+        info_ref+=("DNS-Auflösung funktioniert")
+    fi
+    
+    # Konnektivitäts-Test
+    local connectivity_passed=0
+    local ping_targets=("1.1.1.1" "8.8.8.8")
+    for target in "${ping_targets[@]}"; do
+        if timeout 5 ping -c 1 "${target}" >/dev/null 2>&1; then
+            ((connectivity_passed++))
+        fi
+    done
+    
+    if [[ ${connectivity_passed} -eq 0 ]]; then
+        issues_ref+=("Keine Internet-Konnektivität")
+    else
+        info_ref+=("Internet-Konnektivität verfügbar")
+    fi
+}
+
+analyze_docker_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Docker-System (erweitert)..."
+    
+    if ! systemctl is-active docker >/dev/null 2>&1; then
+        issues_ref+=("Docker-Dienst nicht aktiv")
+        return 1
+    fi
+    
+    local docker_version
+    docker_version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "unbekannt")
+    echo "Docker-Version: ${docker_version}"
+    
+    local total_containers running_containers
+    total_containers=$(docker ps -a -q 2>/dev/null | wc -l || echo "0")
+    running_containers=$(docker ps -q 2>/dev/null | wc -l || echo "0")
+    echo "Container: ${running_containers}/${total_containers} aktiv"
+    
+    local unhealthy_count
+    unhealthy_count=$(docker ps --filter health=unhealthy -q 2>/dev/null | wc -l || echo "0")
+    if [[ ${unhealthy_count} -gt 0 ]]; then
+        warnings_ref+=("${unhealthy_count} Container mit Status 'unhealthy'")
+    fi
+    
+    info_ref+=("Docker: ${running_containers} Container aktiv")
+}
+
+analyze_globalping_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Globalping-Probe (erweitert)..."
+    
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "Docker nicht verfügbar"
+        return 0
+    fi
+    
+    local container_name
+    container_name=$(docker ps -a --format "{{.Names}}" | grep -i globalping | head -1 || echo "")
+    
+    if [[ -z "${container_name}" ]]; then
+        warnings_ref+=("Globalping-Probe nicht installiert")
+        return 0
+    fi
+    
+    echo "Container: ${container_name}"
+    
+    local container_status
+    container_status=$(docker inspect -f '{{.State.Status}}' "${container_name}" 2>/dev/null || echo "unknown")
+    echo "Status: ${container_status}"
+    
+    case "${container_status}" in
+        "running")
+            local restart_policy
+            restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "${container_name}" 2>/dev/null || echo "")
+            echo "Restart-Policy: ${restart_policy}"
+            
+            if [[ "${restart_policy}" != "always" ]]; then
+                warnings_ref+=("Globalping Restart-Policy nicht 'always': ${restart_policy}")
+            fi
+            
+            local api_connection
+            api_connection=$(docker logs --tail 50 "${container_name}" 2>&1 | grep -c "Connection to API established\|Connected from" || echo "0")
+            
+            if [[ ${api_connection} -gt 0 ]]; then
+                info_ref+=("Globalping-Probe: API-Verbindung aktiv")
+            else
+                warnings_ref+=("Globalping-Probe: Keine API-Verbindung erkannt")
+            fi
+            ;;
+        *)
+            issues_ref+=("Globalping-Probe nicht aktiv: ${container_status}")
+            ;;
+    esac
+}
+
+analyze_autoupdate_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Auto-Update-System..."
+    
+    local update_mechanisms=()
+    
+    if check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
+        update_mechanisms+=("systemd-timer")
+        
+        if systemctl is-active globalping-update.timer >/dev/null 2>&1; then
+            local next_run
+            next_run=$(systemctl show globalping-update.timer --property=NextElapseUSecRealtime --value 2>/dev/null || echo "unknown")
+            echo "Systemd-Timer: aktiv (nächster Lauf: ${next_run})"
+        else
+            warnings_ref+=("Systemd-Timer aktiviert aber nicht aktiv")
+        fi
+    fi
+    
+    if check_crontab_available && crontab -l 2>/dev/null | grep -q "auto-weekly"; then
+        update_mechanisms+=("crontab")
+        echo "Crontab: konfiguriert"
+    fi
+    
+    if [[ ${#update_mechanisms[@]} -eq 0 ]]; then
+        warnings_ref+=("Kein Auto-Update-Mechanismus aktiv")
+    else
+        info_ref+=("Auto-Update aktiv: ${update_mechanisms[*]}")
+    fi
+    
+    if [[ -f "${SCRIPT_PATH}" && -x "${SCRIPT_PATH}" ]]; then
+        local script_version
+        script_version=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "unknown")
+        echo "Update-Skript: ${script_version}"
+        info_ref+=("Update-Skript: Version ${script_version}")
+    else
+        warnings_ref+=("Update-Skript nicht gefunden: ${SCRIPT_PATH}")
+    fi
+}
+
+analyze_security_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere Sicherheits-Konfiguration..."
+    
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        local root_login password_auth
+        root_login=$(grep "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
+        password_auth=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
+        
+        echo "SSH Root-Login: ${root_login}"
+        echo "SSH Password-Auth: ${password_auth}"
+        
+        if [[ "${root_login}" == "yes" ]]; then
+            warnings_ref+=("SSH Root-Login aktiviert")
+        fi
+    fi
+    
+    local firewall_status="nicht erkannt"
+    if command -v ufw >/dev/null 2>&1; then
+        firewall_status=$(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "unknown")
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        if firewall-cmd --state >/dev/null 2>&1; then
+            firewall_status="firewalld aktiv"
+        else
+            firewall_status="firewalld inaktiv"
+        fi
+    fi
+    echo "Firewall: ${firewall_status}"
+    
+    info_ref+=("Sicherheit: SSH konfiguriert, Firewall ${firewall_status}")
+}
+
+analyze_performance_enhanced() {
+    local -n issues_ref=$1
+    local -n warnings_ref=$2
+    local -n info_ref=$3
+    
+    echo "Analysiere System-Performance..."
+    
+    if [[ -r /proc/loadavg ]]; then
+        local load_1min load_5min
+        read -r load_1min load_5min _ _ _ < /proc/loadavg
+        echo "Load Average: ${load_1min} (1min), ${load_5min} (5min)"
+        
+        local cpu_cores
+        cpu_cores=$(nproc 2>/dev/null || echo "1")
+        
+        if (( $(echo "${load_1min} > ${cpu_cores} * 2" | bc -l 2>/dev/null || echo "0") )); then
+            warnings_ref+=("Sehr hohe CPU-Last: ${load_1min} (Kerne: ${cpu_cores})")
+        fi
+    fi
+    
+    local iowait
+    iowait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%' 2>/dev/null || echo "0")
+    echo "I/O-Wait: ${iowait}%"
+    
+    if (( $(echo "${iowait} > 20" | bc -l 2>/dev/null || echo "0") )); then
+        warnings_ref+=("Hohe I/O-Wait: ${iowait}%")
+    fi
+    
+    local open_files
+    open_files=$(lsof 2>/dev/null | wc -l || echo "0")
+    echo "Offene Dateien: ${open_files}"
+    
+    info_ref+=("Performance: Load ${load_1min}, I/O-Wait ${iowait}%")
 }
 
 # Erweiterte Hilfefunktion
@@ -3236,14 +3062,11 @@ TELEGRAM-KONFIGURATION:
     3. Teste mit: ./install.sh --test-telegram --telegram-token "TOKEN" --telegram-chat "CHAT_ID"
 
 NEUE FEATURES:
-    ✓ Keine doppelten Telegram-Benachrichtigungen mehr
-    ✓ Sichere Mathematik ohne bc-Abhängigkeit  
-    ✓ Sensible Daten werden nicht in Telegram gezeigt
-    ✓ Erweiterte Abhängigkeiten (unzip, tar, gzip, etc.)
+    ✓ Behebt Phased Updates Problem (verhindert unnötige Reboots)
+    ✓ Erweiterte Update-Bereinigung (apt clean/autoremove für alle OS)
+    ✓ Verbesserte Telegram-Fehler-Nachrichten mit IP/Provider/ASN-Links
     ✓ Intelligente Swap-Konfiguration (RAM + Swap ≥ 1GB)
-    ✓ Automatische Reboots bei kritischen Updates
-    ✓ Absolute Speicherplatz-Schwellwerte (1.5GB minimum)
-    ✓ CPU-Hang-Schutz durch Timeouts
+    ✓ Automatische Reboots nur bei echten kritischen Updates
     ✓ restart=always für Globalping-Container
     ✓ Tägliche Log-Rotation (max 50MB)
     ✓ Wöchentliche automatische Wartung
@@ -3519,19 +3342,6 @@ execute_enhanced_special_modes() {
     return 0
 }
 
-# Validiere normale Installationsargumente
-validate_installation_args() {
-    if [[ -z "${ADOPTION_TOKEN}" ]]; then
-        enhanced_log "WARN" "Kein Adoption-Token - Globalping-Probe wird nicht installiert"
-        echo "Warnung: Ohne --adoption-token wird keine Globalping-Probe installiert" >&2
-    fi
-    
-    if [[ -n "${TELEGRAM_TOKEN}" && -z "${TELEGRAM_CHAT}" ]] || [[ -z "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
-        enhanced_log "WARN" "Unvollständige Telegram-Konfiguration"
-        echo "Für Telegram-Benachrichtigungen werden sowohl --telegram-token als auch --telegram-chat benötigt" >&2
-    fi
-}
-
 # Spezielle Modi ausführen
 execute_docker_only_mode() {
     log "Führe Docker-Installation durch"
@@ -3547,7 +3357,7 @@ execute_docker_only_mode() {
 
 execute_diagnostics_mode() {
     log "Führe vollständige Systemdiagnose durch"
-    run_enhanced_diagnostics_silent  # Verwende Silent-Version (keine Telegram-Nachrichten)
+    run_enhanced_diagnostics
     return $?
 }
 
@@ -3556,8 +3366,6 @@ execute_network_diagnostics_mode() {
     run_enhanced_network_diagnosis
     return $?
 }
-
-# [Die restlichen execute_*_mode Funktionen...]
 
 execute_weekly_mode() {
     log "Führe wöchentliche automatische Wartung durch"
@@ -3586,144 +3394,16 @@ execute_emergency_cleanup_mode() {
     return $?
 }
 
-# Erweiterte Netzwerk-Diagnose
-run_enhanced_network_diagnosis() {
-    log "Führe erweiterte Netzwerk-Diagnose durch"
-    
-    local issues=()
-    local warnings=()
-    local info_items=()
-    
-    echo "=== ERWEITERTE NETZWERK-DIAGNOSE ==="
-    echo "Zeitpunkt: $(date)"
-    echo "===================================="
-    
-    # Basis-Netzwerk-Tests mit Timeouts
-    analyze_network_enhanced issues warnings info_items
-    
-    # Erweiterte Tests
-    echo -e "\n[NETZWERK] Latenz-Tests"
-    perform_latency_tests issues warnings info_items
-    
-    echo -e "\n[NETZWERK] Bandwidth-Schätzung"
-    perform_bandwidth_test issues warnings info_items
-    
-    echo -e "\n[NETZWERK] IPv6-Tests"
-    test_ipv6_connectivity issues warnings info_items
-    
-    # Ergebnisse anzeigen
-    echo -e "\n=== NETZWERK-DIAGNOSE ERGEBNISSE ==="
-    echo "Probleme: ${#issues[@]}, Warnungen: ${#warnings[@]}, Info: ${#info_items[@]}"
-    
-    if [[ ${#issues[@]} -gt 0 ]]; then
-        echo -e "\n🔴 NETZWERK-PROBLEME:"
-        printf ' - %s\n' "${issues[@]}"
-        enhanced_notify "error" "Netzwerk-Probleme" "$(printf '%s\n' "${issues[@]}" | head -3)"
-        return 1
+# Validiere normale Installationsargumente
+validate_installation_args() {
+    if [[ -z "${ADOPTION_TOKEN}" ]]; then
+        enhanced_log "WARN" "Kein Adoption-Token - Globalping-Probe wird nicht installiert"
+        echo "Warnung: Ohne --adoption-token wird keine Globalping-Probe installiert" >&2
     fi
     
-    return 0
-}
-
-# Latenz-Tests
-perform_latency_tests() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    local targets=("1.1.1.1" "8.8.8.8" "google.com")
-    local high_latency_count=0
-    
-    for target in "${targets[@]}"; do
-        local ping_result
-        ping_result=$(timeout 10 ping -c 3 "${target}" 2>/dev/null | grep "avg" || echo "")
-        
-        if [[ -n "${ping_result}" ]]; then
-            local avg_latency
-            avg_latency=$(echo "${ping_result}" | cut -d'/' -f5 | cut -d'.' -f1 || echo "999")
-            echo "Latenz ${target}: ${avg_latency}ms"
-            
-            if [[ ${avg_latency} -gt 500 ]]; then
-                issues_ref+=("Sehr hohe Latenz ${target}: ${avg_latency}ms")
-                ((high_latency_count++))
-            elif [[ ${avg_latency} -gt 200 ]]; then
-                warnings_ref+=("Hohe Latenz ${target}: ${avg_latency}ms")
-                ((high_latency_count++))
-            fi
-        else
-            warnings_ref+=("Latenz-Test ${target} fehlgeschlagen")
-        fi
-    done
-    
-    if [[ ${high_latency_count} -eq 0 ]]; then
-        info_ref+=("Netzwerk-Latenz: Alle Tests unter 200ms")
-    fi
-}
-
-# Bandwidth-Test
-perform_bandwidth_test() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    local test_url="http://speedtest.tele2.net/1MB.zip"
-    local start_time end_time
-    
-    echo "Führe Bandwidth-Test durch..."
-    start_time=$(date +%s.%N 2>/dev/null || date +%s)
-    
-    if timeout 30 curl -s --connect-timeout 5 "${test_url}" -o /dev/null 2>/dev/null; then
-        end_time=$(date +%s.%N 2>/dev/null || date +%s)
-        local duration
-        duration=$(echo "${end_time} - ${start_time}" | bc -l 2>/dev/null || echo "1")
-        
-        if command -v bc >/dev/null 2>&1 && (( $(echo "${duration} > 0" | bc -l 2>/dev/null || echo "1") )); then
-            local speed_mbps
-            speed_mbps=$(echo "scale=1; 8 / ${duration}" | bc -l 2>/dev/null || echo "1")
-            echo "Download-Geschwindigkeit: ${speed_mbps} Mbps"
-            
-            if (( $(echo "${speed_mbps} < 1" | bc -l 2>/dev/null || echo "0") )); then
-                warnings_ref+=("Sehr langsame Verbindung: ${speed_mbps} Mbps")
-            else
-                info_ref+=("Download-Geschwindigkeit: ${speed_mbps} Mbps")
-            fi
-        else
-            info_ref+=("Download-Test erfolgreich (Geschwindigkeit nicht berechenbar)")
-        fi
-    else
-        warnings_ref+=("Bandwidth-Test fehlgeschlagen")
-    fi
-}
-
-# IPv6-Tests
-test_ipv6_connectivity() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    local ipv6_addresses
-    ipv6_addresses=$(ip addr show 2>/dev/null | grep "inet6.*scope global" | wc -l || echo "0")
-    
-    echo "IPv6-Adressen: ${ipv6_addresses}"
-    
-    if [[ ${ipv6_addresses} -eq 0 ]]; then
-        echo "IPv6 nicht konfiguriert"
-        return 0
-    fi
-    
-    local ipv6_targets=("2606:4700:4700::1111" "2001:4860:4860::8888")
-    local successful_tests=0
-    
-    for target in "${ipv6_targets[@]}"; do
-        if timeout 5 ping -6 -c 1 "${target}" >/dev/null 2>&1; then
-            ((successful_tests++))
-        fi
-    done
-    
-    if [[ ${successful_tests} -eq 0 ]]; then
-        warnings_ref+=("IPv6 konfiguriert aber keine Konnektivität")
-    else
-        info_ref+=("IPv6-Konnektivität: ${successful_tests}/${#ipv6_targets[@]} Tests erfolgreich")
+    if [[ -n "${TELEGRAM_TOKEN}" && -z "${TELEGRAM_CHAT}" ]] || [[ -z "${TELEGRAM_TOKEN}" && -n "${TELEGRAM_CHAT}" ]]; then
+        enhanced_log "WARN" "Unvollständige Telegram-Konfiguration"
+        echo "Für Telegram-Benachrichtigungen werden sowohl --telegram-token als auch --telegram-chat benötigt" >&2
     fi
 }
 
@@ -3754,6 +3434,256 @@ enable_enhanced_debug_mode() {
     } >&19
     
     enhanced_log "INFO" "Erweiterter Debug-Modus aktiviert: ${debug_log}"
+    return 0
+}
+
+run_enhanced_network_diagnosis() {
+    log "Führe erweiterte Netzwerk-Diagnose durch"
+    
+    local issues=()
+    local warnings=()
+    local info_items=()
+    
+    echo "=== ERWEITERTE NETZWERK-DIAGNOSE ==="
+    echo "Zeitpunkt: $(date)"
+    echo "===================================="
+    
+    # Basis-Netzwerk-Tests mit Timeouts
+    analyze_network_enhanced issues warnings info_items
+    
+    # Ergebnisse anzeigen
+    echo -e "\n=== NETZWERK-DIAGNOSE ERGEBNISSE ==="
+    echo "Probleme: ${#issues[@]}, Warnungen: ${#warnings[@]}, Info: ${#info_items[@]}"
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo -e "\n🔴 NETZWERK-PROBLEME:"
+        printf ' - %s\n' "${issues[@]}"
+        enhanced_notify "error" "Netzwerk-Probleme" "$(printf '%s\n' "${issues[@]}" | head -3)"
+        return 1
+    fi
+    
+    return 0
+}
+
+# KORRIGIERTE Erweiterte Hauptfunktion (mit korrigiertem Modus)
+enhanced_main() {
+    local start_time
+    start_time=$(date +%s)
+    
+    enhanced_log "INFO" "=== STARTE ERWEITERTES SERVER-SETUP ==="
+    enhanced_log "INFO" "Version: ${SCRIPT_VERSION}"
+    enhanced_log "INFO" "Modus: ${WEEKLY_MODE:-Normal}"  # KORRIGIERT
+    enhanced_log "INFO" "Startzeit: $(date)"
+    enhanced_log "INFO" "========================================="
+    
+    # Sammle Systeminformationen früh
+    get_enhanced_system_info
+    
+    # PHASE 1: Erweiterte Systemvalidierung
+    enhanced_log "INFO" "Phase 1: Erweiterte Systemvalidierung"
+    if ! enhanced_validate_system; then
+        # enhanced_notify wird bereits in enhanced_validate_system aufgerufen
+        return 1
+    fi
+    
+    # PHASE 2: Grundlegende Systemvorbereitung
+    enhanced_log "INFO" "Phase 2: Systemvorbereitung"
+    
+    install_sudo || enhanced_log "WARN" "sudo-Installation fehlgeschlagen"
+    
+    if ! install_dependencies; then
+        enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
+    fi
+    
+    if ! update_system; then
+        enhanced_log "WARN" "Systemaktualisierung fehlgeschlagen"
+    fi
+    
+    # PHASE 3: Swap-Konfiguration
+    enhanced_log "INFO" "Phase 3: Intelligente Swap-Konfiguration"
+    if ! configure_smart_swap; then
+        enhanced_log "WARN" "Swap-Konfiguration fehlgeschlagen"
+    fi
+    
+    # PHASE 4: Systemkonfiguration
+    enhanced_log "INFO" "Phase 4: Systemkonfiguration"
+    
+    if ! configure_hostname; then
+        enhanced_log "WARN" "Hostname-Konfiguration fehlgeschlagen"
+    fi
+    
+    if [[ -n "${SSH_KEY}" ]]; then
+        if ! setup_ssh_key; then
+            enhanced_log "WARN" "SSH-Schlüssel-Setup fehlgeschlagen"
+        fi
+    fi
+    
+    # PHASE 5: Ubuntu Pro
+    enhanced_log "INFO" "Phase 5: Ubuntu Pro Aktivierung"
+    if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
+        if ! ubuntu_pro_attach; then
+            enhanced_log "WARN" "Ubuntu Pro Aktivierung fehlgeschlagen"
+        fi
+    fi
+    
+    # PHASE 6: Docker-Installation
+    enhanced_log "INFO" "Phase 6: Docker-System"
+    
+    if [[ -n "${ADOPTION_TOKEN}" ]] || ! command -v docker >/dev/null 2>&1; then
+        if ! install_docker; then
+            enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
+            enhanced_notify "error" "Docker-Installation" "Docker konnte nicht installiert werden. Globalping-Probe nicht verfügbar."
+        else
+            if ! install_docker_compose; then
+                enhanced_log "WARN" "Docker Compose-Installation fehlgeschlagen"
+            fi
+        fi
+    fi
+    
+    # PHASE 7: Globalping-Probe
+    enhanced_log "INFO" "Phase 7: Erweiterte Globalping-Probe"
+    if [[ -n "${ADOPTION_TOKEN}" ]]; then
+        if ! install_enhanced_globalping_probe; then
+            enhanced_log "ERROR" "Globalping-Probe-Installation fehlgeschlagen"
+            enhanced_notify "error" "Globalping-Probe" "Installation der Globalping-Probe fehlgeschlagen"
+        fi
+    else
+        enhanced_log "INFO" "Kein Adoption-Token - überspringe Globalping-Probe"
+    fi
+    
+    # PHASE 8: Auto-Update-Konfiguration
+    enhanced_log "INFO" "Phase 8: Erweiterte Auto-Update-Konfiguration"
+    if ! setup_enhanced_auto_update; then
+        enhanced_log "WARN" "Auto-Update-Einrichtung fehlgeschlagen"
+    fi
+    
+    # PHASE 9: Kritische Updates (KORRIGIERT für Phased Updates)
+    enhanced_log "INFO" "Phase 9: Kritische Updates und Reboot-Check"
+    if [[ "${NO_REBOOT:-}" != "true" ]]; then
+        if ! check_critical_updates; then
+            enhanced_log "WARN" "Update-Check fehlgeschlagen"
+        fi
+        
+        # Wenn Reboot geplant ist, beende hier
+        if [[ "${REBOOT_REQUIRED}" == "true" ]]; then
+            enhanced_log "INFO" "Reboot geplant - Setup wird nach Neustart fortgesetzt"
+            return 0
+        fi
+    else
+        enhanced_log "INFO" "Reboot-Check übersprungen (--no-reboot)"
+    fi
+    
+    # PHASE 10: Systemoptimierung
+    enhanced_log "INFO" "Phase 10: Erweiterte Systemoptimierung"
+    if ! perform_enhanced_system_cleanup; then
+        enhanced_log "WARN" "Systemreinigung fehlgeschlagen"
+    fi
+    
+    # PHASE 11: Abschlussdiagnose (Silent-Version)
+    enhanced_log "INFO" "Phase 11: Abschlussdiagnose"
+    local diagnosis_success=true
+    if ! run_enhanced_diagnostics_silent; then
+        enhanced_log "WARN" "Abschlussdiagnose ergab Probleme"
+        diagnosis_success=false
+    fi
+    
+    # PHASE 12: Zusammenfassung
+    enhanced_log "INFO" "Phase 12: Abschluss und Zusammenfassung"
+    create_enhanced_summary
+    
+    # Berechne Ausführungszeit
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    
+    enhanced_log "INFO" "=== ERWEITERTES SERVER-SETUP ABGESCHLOSSEN ==="
+    enhanced_log "INFO" "Ausführungszeit: ${duration} Sekunden"
+    enhanced_log "INFO" "Abschlusszeit: $(date)"
+    enhanced_log "INFO" "=============================================="
+    
+    # NUR EINE Erfolgreiche Installation-Benachrichtigung
+    if [[ "${WEEKLY_MODE}" != "true" && "${TELEGRAM_SENT}" != "true" && "${diagnosis_success}" == "true" ]]; then
+        enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
+
+Konfigurierte Features:
+${ADOPTION_TOKEN:+✓ Globalping-Probe}
+${TELEGRAM_TOKEN:+✓ Telegram-Benachrichtigungen}
+${SSH_KEY:+✓ SSH-Zugang}
+✓ Automatische Wartung
+✓ Intelligente Swap-Konfiguration"
+    fi
+    
+    return 0
+}
+
+# Silent-Version der Diagnose (ohne automatische Telegram-Nachricht)
+run_enhanced_diagnostics_silent() {
+    log "Führe erweiterte Systemdiagnose durch"
+    
+    local issues=()
+    local warnings=()
+    local info_items=()
+    
+    echo "=== ERWEITERTE SYSTEMDIAGNOSE ==="
+    echo "Zeitpunkt: $(date)"
+    echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
+    echo "Skript-Version: ${SCRIPT_VERSION}"
+    echo "=================================="
+    
+    # Alle Diagnose-Schritte
+    analyze_hardware_enhanced issues warnings info_items
+    analyze_memory_enhanced issues warnings info_items
+    analyze_network_enhanced issues warnings info_items
+    
+    if command -v docker >/dev/null 2>&1; then
+        analyze_docker_enhanced issues warnings info_items
+    fi
+    
+    analyze_globalping_enhanced issues warnings info_items
+    analyze_autoupdate_enhanced issues warnings info_items
+    analyze_security_enhanced issues warnings info_items
+    analyze_performance_enhanced issues warnings info_items
+    
+    # Ergebnisse
+    echo -e "\n=== DIAGNOSE-ERGEBNISSE ==="
+    echo "Kritische Probleme: ${#issues[@]}"
+    echo "Warnungen: ${#warnings[@]}"
+    echo "Informationen: ${#info_items[@]}"
+    
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo -e "\n🔴 KRITISCHE PROBLEME:"
+        printf ' - %s\n' "${issues[@]}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Erweiterte Zusammenfassung
+create_enhanced_summary() {
+    local summary_file="/root/enhanced_setup_summary_$(date +%Y%m%d_%H%M%S).txt"
+    
+    enhanced_log "INFO" "Erstelle erweiterte Zusammenfassung: ${summary_file}"
+    
+    {
+        echo "=========================================="
+        echo "    ERWEITERTE SERVER SETUP ZUSAMMENFASSUNG"
+        echo "=========================================="
+        echo "Datum: $(date)"
+        echo "Skript-Version: ${SCRIPT_VERSION}"
+        echo "Hostname: $(hostname 2>/dev/null || echo 'unbekannt')"
+        echo "Land: ${COUNTRY}, IP: ${PUBLIC_IP}"
+        echo "Globalping-Probe: ${ADOPTION_TOKEN:+Installiert}${ADOPTION_TOKEN:-Nicht installiert}"
+        echo "Telegram: ${TELEGRAM_TOKEN:+Konfiguriert}${TELEGRAM_TOKEN:-Nicht konfiguriert}"
+        echo "Auto-Update: Wöchentlich aktiv"
+        echo "=========================================="
+    } > "${summary_file}"
+    
+    echo "=== SETUP ERFOLGREICH ABGESCHLOSSEN ==="
+    echo "Details: ${summary_file}"
+    echo "Automatische Wartung: Wöchentlich geplant"
+    echo "========================================"
+    
     return 0
 }
 
