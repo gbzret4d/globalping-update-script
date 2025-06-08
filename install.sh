@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.6.0"
+readonly SCRIPT_VERSION="2025.06.08-v1.7.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -1103,7 +1103,7 @@ configure_smart_swap() {
     return 0
 }
 
-# KORRIGIERTE Prüfung auf kritische Updates (behebt Phased Updates Problem)
+# KORRIGIERTE Prüfung auf kritische Updates (behebt Phased Updates Problem und Syntax-Fehler)
 check_critical_updates() {
     log "Prüfe auf kritische Updates (mit Phased Updates Berücksichtigung)"
     
@@ -1122,22 +1122,42 @@ check_critical_updates() {
         local available_updates
         available_updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" | grep -v "Listing" || echo "")
         
-        # Filtere phased updates heraus
+        # KORRIGIERTE Zählung mit sicherer Bereinigung
         local kernel_updates=0
         local critical_updates=0
         
         if [[ -n "${available_updates}" ]]; then
-            # Prüfe auf Kernel-Updates - KORRIGIERT
-            kernel_updates=$(echo "${available_updates}" | grep -c "linux-image\|linux-generic\|linux-headers" || echo "0")
+            # Sichere Zählung für Kernel-Updates - KORRIGIERT
+            local kernel_count
+            kernel_count=$(echo "${available_updates}" | grep -c "linux-image\|linux-generic\|linux-headers" 2>/dev/null || echo "0")
+            # Bereinige Output - entferne Newlines und Carriage Returns
+            kernel_updates=$(echo "${kernel_count}" | tr -d '\n\r' | head -c 10)
+            # Stelle sicher, dass es eine gültige Zahl ist
+            if ! [[ "${kernel_updates}" =~ ^[0-9]+$ ]]; then
+                kernel_updates=0
+            fi
             
-            # Prüfe auf kritische System-Updates - KORRIGIERT  
-            critical_updates=$(echo "${available_updates}" | grep -c "systemd\|libc6\|glibc" || echo "0")
+            # Sichere Zählung für kritische System-Updates - KORRIGIERT
+            local critical_count
+            critical_count=$(echo "${available_updates}" | grep -c "systemd\|libc6\|glibc" 2>/dev/null || echo "0")
+            # Bereinige Output - entferne Newlines und Carriage Returns
+            critical_updates=$(echo "${critical_count}" | tr -d '\n\r' | head -c 10)
+            # Stelle sicher, dass es eine gültige Zahl ist
+            if ! [[ "${critical_updates}" =~ ^[0-9]+$ ]]; then
+                critical_updates=0
+            fi
             
-            # Prüfe, ob es sich um phased updates handelt
+            # Prüfe, ob es sich um phased updates handelt - KORRIGIERT
             local phased_count
-            phased_count=$(echo "${available_updates}" | grep -c "phased" || echo "0")
+            phased_count=$(echo "${available_updates}" | grep -c "phased" 2>/dev/null || echo "0")
+            # Bereinige Output
+            phased_count=$(echo "${phased_count}" | tr -d '\n\r' | head -c 10)
+            if ! [[ "${phased_count}" =~ ^[0-9]+$ ]]; then
+                phased_count=0
+            fi
             
-            if [[ ${phased_count} -gt 0 ]]; then
+            # KORRIGIERTE Bedingung für phased updates
+            if [[ ${phased_count} -gt 0 ]] 2>/dev/null; then
                 log "Phased Updates erkannt (${phased_count}) - überspringe Reboot"
                 # Führe Updates trotzdem durch, aber ohne Reboot
                 if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
@@ -1148,18 +1168,19 @@ check_critical_updates() {
             fi
         fi
         
-        if [[ ${kernel_updates} -gt 0 ]]; then
+        # KORRIGIERTE Bedingungen mit sicherer Zahlenprüfung
+        if [[ ${kernel_updates} -gt 0 ]] 2>/dev/null; then
             log "ECHTE Kernel-Updates gefunden: ${kernel_updates}"
             needs_reboot=true
         fi
         
-        if [[ ${critical_updates} -gt 0 ]]; then
+        if [[ ${critical_updates} -gt 0 ]] 2>/dev/null; then
             log "ECHTE kritische System-Updates gefunden: ${critical_updates}"
             needs_reboot=true
         fi
         
         # Führe Updates durch
-        if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]]; then
+        if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]] 2>/dev/null; then
             log "Installiere kritische Updates..."
             if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
                 log "Updates erfolgreich installiert"
@@ -1171,12 +1192,18 @@ check_critical_updates() {
             perform_package_cleanup
         fi
         
-    # Für RHEL/CentOS/Fedora
+    # Für RHEL/CentOS/Fedora - KORRIGIERT
     elif command -v dnf >/dev/null 2>&1; then
         local kernel_updates
         kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" || echo "0")
+        # Bereinige Output
+        kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | head -c 10)
+        if ! [[ "${kernel_updates}" =~ ^[0-9]+$ ]]; then
+            kernel_updates=0
+        fi
         
-        if [[ ${kernel_updates} -gt 0 ]]; then
+        # KORRIGIERTE Bedingung
+        if [[ ${kernel_updates} -gt 0 ]] 2>/dev/null; then
             log "Kernel-Updates gefunden, installiere..."
             if timeout "${TIMEOUT_PACKAGE}" dnf update -y kernel* >/dev/null 2>&1; then
                 needs_reboot=true
@@ -1194,9 +1221,12 @@ check_critical_updates() {
         dnf autoremove -y >/dev/null 2>&1 || true
         
     elif command -v yum >/dev/null 2>&1; then
+        # YUM Updates
         if timeout "${TIMEOUT_PACKAGE}" yum update -y kernel* systemd glibc openssh* >/dev/null 2>&1; then
             needs_reboot=true
+            log "Kritische Updates mit YUM installiert"
         fi
+        
         # YUM Bereinigung
         yum clean all >/dev/null 2>&1 || true
         yum autoremove -y >/dev/null 2>&1 || true
@@ -1204,9 +1234,11 @@ check_critical_updates() {
     
     # Prüfe, ob /var/run/reboot-required existiert (Ubuntu)
     if [[ -f /var/run/reboot-required ]]; then
+        log "/var/run/reboot-required gefunden - Reboot erforderlich"
         needs_reboot=true
     fi
     
+    # KORRIGIERTE Reboot-Entscheidung
     if [[ "${needs_reboot}" == "true" ]]; then
         log "Reboot nach ECHTEN kritischen Updates erforderlich"
         REBOOT_REQUIRED="true"
@@ -2745,6 +2777,7 @@ analyze_hardware_enhanced() {
     info_ref+=("Virtualisierung: ${virt_type}")
 }
 
+# KORRIGIERTE Speicher-Analyse (behebt ähnliche Syntax-Fehler)
 analyze_memory_enhanced() {
     local -n issues_ref=$1
     local -n warnings_ref=$2
@@ -2752,77 +2785,74 @@ analyze_memory_enhanced() {
     
     echo "Analysiere Speicher (erweitert)..."
     
+    # KORRIGIERTE RAM-Details mit sicherer Berechnung
     local mem_total_kb mem_available_kb mem_total_mb mem_available_mb
     mem_total_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
     mem_available_kb=$(grep "MemAvailable" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    mem_total_mb=$((mem_total_kb / 1024))
-    mem_available_mb=$((mem_available_kb / 1024))
+    
+    # Sichere Integer-Berechnung
+    if [[ "${mem_total_kb}" =~ ^[0-9]+$ ]]; then
+        mem_total_mb=$((mem_total_kb / 1024))
+    else
+        mem_total_mb=0
+    fi
+    
+    if [[ "${mem_available_kb}" =~ ^[0-9]+$ ]]; then
+        mem_available_mb=$((mem_available_kb / 1024))
+    else
+        mem_available_mb=0
+    fi
     
     echo "RAM: ${mem_available_mb}MB frei von ${mem_total_mb}MB"
     
-    if [[ ${mem_total_mb} -lt ${MIN_RAM_MB} ]]; then
+    # KORRIGIERTE Bedingungen
+    if [[ ${mem_total_mb} -lt ${MIN_RAM_MB} ]] 2>/dev/null; then
         issues_ref+=("Zu wenig RAM: ${mem_total_mb}MB (Minimum: ${MIN_RAM_MB}MB)")
-    elif [[ ${mem_available_mb} -lt 100 ]]; then
+    elif [[ ${mem_available_mb} -lt 100 ]] 2>/dev/null; then
         warnings_ref+=("Wenig freier RAM: ${mem_available_mb}MB")
+    fi
+    
+    # KORRIGIERTE Swap-Analyse
+    local swap_total_kb swap_used_kb swap_total_mb swap_used_mb
+    swap_total_kb=$(grep "SwapTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+    swap_used_kb=$(grep "SwapUsed" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+    
+    # Sichere Integer-Berechnung
+    if [[ "${swap_total_kb}" =~ ^[0-9]+$ ]]; then
+        swap_total_mb=$((swap_total_kb / 1024))
+    else
+        swap_total_mb=0
+    fi
+    
+    if [[ "${swap_used_kb}" =~ ^[0-9]+$ ]]; then
+        swap_used_mb=$((swap_used_kb / 1024))
+    else
+        swap_used_mb=0
+    fi
+    
+    # KORRIGIERTE Swap-Prüfung
+    if [[ ${swap_total_mb} -eq 0 ]] 2>/dev/null; then
+        echo "Swap: Nicht konfiguriert"
+        local combined_mb=$((mem_total_mb + swap_total_mb))
+        local min_combined_mb=$((SWAP_MIN_TOTAL_GB * 1024))
+        if [[ ${combined_mb} -lt ${min_combined_mb} ]] 2>/dev/null; then
+            warnings_ref+=("RAM+Swap unter ${SWAP_MIN_TOTAL_GB}GB: ${combined_mb}MB")
+        fi
+    else
+        echo "Swap: ${swap_used_mb}MB verwendet von ${swap_total_mb}MB"
+        local swap_usage_percent=0
+        if [[ ${swap_total_mb} -gt 0 ]] 2>/dev/null; then
+            swap_usage_percent=$((swap_used_mb * 100 / swap_total_mb))
+        fi
+        if [[ ${swap_usage_percent} -gt 80 ]] 2>/dev/null; then
+            warnings_ref+=("Hohe Swap-Nutzung: ${swap_used_mb}MB/${swap_total_mb}MB")
+        fi
     fi
     
     info_ref+=("Speicher: ${mem_available_mb}MB RAM frei")
 }
 
-analyze_network_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Netzwerk (erweitert)..."
-    
-    local active_interfaces
-    active_interfaces=$(ip link show up 2>/dev/null | grep -c "state UP" || echo "0")
-    echo "Aktive Interfaces: ${active_interfaces}"
-    
-    if [[ ${active_interfaces} -eq 0 ]]; then
-        issues_ref+=("Keine aktiven Netzwerk-Interfaces")
-        return 1
-    fi
-    
-    local public_ip
-    public_ip=$(curl -s https://api.ipify.org 2>/dev/null || echo "unbekannt")
-    echo "Öffentliche IP: ${public_ip}"
-    info_ref+=("Öffentliche IP: ${public_ip}")
-    
-    # DNS-Test
-    local dns_test_passed=0
-    local dns_targets=("google.com" "cloudflare.com")
-    for target in "${dns_targets[@]}"; do
-        if timeout 5 nslookup "${target}" >/dev/null 2>&1; then
-            ((dns_test_passed++))
-        fi
-    done
-    
-    if [[ ${dns_test_passed} -eq 0 ]]; then
-        issues_ref+=("DNS-Auflösung fehlgeschlagen")
-    elif [[ ${dns_test_passed} -lt ${#dns_targets[@]} ]]; then
-        warnings_ref+=("DNS-Auflösung teilweise fehlgeschlagen")
-    else
-        info_ref+=("DNS-Auflösung funktioniert")
-    fi
-    
-    # Konnektivitäts-Test
-    local connectivity_passed=0
-    local ping_targets=("1.1.1.1" "8.8.8.8")
-    for target in "${ping_targets[@]}"; do
-        if timeout 5 ping -c 1 "${target}" >/dev/null 2>&1; then
-            ((connectivity_passed++))
-        fi
-    done
-    
-    if [[ ${connectivity_passed} -eq 0 ]]; then
-        issues_ref+=("Keine Internet-Konnektivität")
-    else
-        info_ref+=("Internet-Konnektivität verfügbar")
-    fi
-}
-
+# KORRIGIERTE Docker-Analyse
 analyze_docker_enhanced() {
     local -n issues_ref=$1
     local -n warnings_ref=$2
@@ -2839,148 +2869,41 @@ analyze_docker_enhanced() {
     docker_version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || echo "unbekannt")
     echo "Docker-Version: ${docker_version}"
     
+    # KORRIGIERTE Container-Statistiken
     local total_containers running_containers
     total_containers=$(docker ps -a -q 2>/dev/null | wc -l || echo "0")
     running_containers=$(docker ps -q 2>/dev/null | wc -l || echo "0")
+    
+    # Bereinige und validiere
+    total_containers=$(echo "${total_containers}" | tr -d '\n\r' | head -c 10)
+    if ! [[ "${total_containers}" =~ ^[0-9]+$ ]]; then
+        total_containers=0
+    fi
+    
+    running_containers=$(echo "${running_containers}" | tr -d '\n\r' | head -c 10)
+    if ! [[ "${running_containers}" =~ ^[0-9]+$ ]]; then
+        running_containers=0
+    fi
+    
     echo "Container: ${running_containers}/${total_containers} aktiv"
     
+    # KORRIGIERTE Unhealthy Container-Prüfung
     local unhealthy_count
     unhealthy_count=$(docker ps --filter health=unhealthy -q 2>/dev/null | wc -l || echo "0")
-    if [[ ${unhealthy_count} -gt 0 ]]; then
+    unhealthy_count=$(echo "${unhealthy_count}" | tr -d '\n\r' | head -c 10)
+    if ! [[ "${unhealthy_count}" =~ ^[0-9]+$ ]]; then
+        unhealthy_count=0
+    fi
+    
+    # KORRIGIERTE Bedingung
+    if [[ ${unhealthy_count} -gt 0 ]] 2>/dev/null; then
         warnings_ref+=("${unhealthy_count} Container mit Status 'unhealthy'")
     fi
     
     info_ref+=("Docker: ${running_containers} Container aktiv")
 }
 
-analyze_globalping_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Globalping-Probe (erweitert)..."
-    
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "Docker nicht verfügbar"
-        return 0
-    fi
-    
-    local container_name
-    container_name=$(docker ps -a --format "{{.Names}}" | grep -i globalping | head -1 || echo "")
-    
-    if [[ -z "${container_name}" ]]; then
-        warnings_ref+=("Globalping-Probe nicht installiert")
-        return 0
-    fi
-    
-    echo "Container: ${container_name}"
-    
-    local container_status
-    container_status=$(docker inspect -f '{{.State.Status}}' "${container_name}" 2>/dev/null || echo "unknown")
-    echo "Status: ${container_status}"
-    
-    case "${container_status}" in
-        "running")
-            local restart_policy
-            restart_policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "${container_name}" 2>/dev/null || echo "")
-            echo "Restart-Policy: ${restart_policy}"
-            
-            if [[ "${restart_policy}" != "always" ]]; then
-                warnings_ref+=("Globalping Restart-Policy nicht 'always': ${restart_policy}")
-            fi
-            
-            local api_connection
-            api_connection=$(docker logs --tail 50 "${container_name}" 2>&1 | grep -c "Connection to API established\|Connected from" || echo "0")
-            
-            if [[ ${api_connection} -gt 0 ]]; then
-                info_ref+=("Globalping-Probe: API-Verbindung aktiv")
-            else
-                warnings_ref+=("Globalping-Probe: Keine API-Verbindung erkannt")
-            fi
-            ;;
-        *)
-            issues_ref+=("Globalping-Probe nicht aktiv: ${container_status}")
-            ;;
-    esac
-}
-
-analyze_autoupdate_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Auto-Update-System..."
-    
-    local update_mechanisms=()
-    
-    if check_systemd_available && systemctl is-enabled globalping-update.timer >/dev/null 2>&1; then
-        update_mechanisms+=("systemd-timer")
-        
-        if systemctl is-active globalping-update.timer >/dev/null 2>&1; then
-            local next_run
-            next_run=$(systemctl show globalping-update.timer --property=NextElapseUSecRealtime --value 2>/dev/null || echo "unknown")
-            echo "Systemd-Timer: aktiv (nächster Lauf: ${next_run})"
-        else
-            warnings_ref+=("Systemd-Timer aktiviert aber nicht aktiv")
-        fi
-    fi
-    
-    if check_crontab_available && crontab -l 2>/dev/null | grep -q "auto-weekly"; then
-        update_mechanisms+=("crontab")
-        echo "Crontab: konfiguriert"
-    fi
-    
-    if [[ ${#update_mechanisms[@]} -eq 0 ]]; then
-        warnings_ref+=("Kein Auto-Update-Mechanismus aktiv")
-    else
-        info_ref+=("Auto-Update aktiv: ${update_mechanisms[*]}")
-    fi
-    
-    if [[ -f "${SCRIPT_PATH}" && -x "${SCRIPT_PATH}" ]]; then
-        local script_version
-        script_version=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "unknown")
-        echo "Update-Skript: ${script_version}"
-        info_ref+=("Update-Skript: Version ${script_version}")
-    else
-        warnings_ref+=("Update-Skript nicht gefunden: ${SCRIPT_PATH}")
-    fi
-}
-
-analyze_security_enhanced() {
-    local -n issues_ref=$1
-    local -n warnings_ref=$2
-    local -n info_ref=$3
-    
-    echo "Analysiere Sicherheits-Konfiguration..."
-    
-    if [[ -f /etc/ssh/sshd_config ]]; then
-        local root_login password_auth
-        root_login=$(grep "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
-        password_auth=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
-        
-        echo "SSH Root-Login: ${root_login}"
-        echo "SSH Password-Auth: ${password_auth}"
-        
-        if [[ "${root_login}" == "yes" ]]; then
-            warnings_ref+=("SSH Root-Login aktiviert")
-        fi
-    fi
-    
-    local firewall_status="nicht erkannt"
-    if command -v ufw >/dev/null 2>&1; then
-        firewall_status=$(ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "unknown")
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        if firewall-cmd --state >/dev/null 2>&1; then
-            firewall_status="firewalld aktiv"
-        else
-            firewall_status="firewalld inaktiv"
-        fi
-    fi
-    echo "Firewall: ${firewall_status}"
-    
-    info_ref+=("Sicherheit: SSH konfiguriert, Firewall ${firewall_status}")
-}
-
+# KORRIGIERTE Performance-Analyse
 analyze_performance_enhanced() {
     local -n issues_ref=$1
     local -n warnings_ref=$2
@@ -2988,6 +2911,7 @@ analyze_performance_enhanced() {
     
     echo "Analysiere System-Performance..."
     
+    # KORRIGIERTE Load Average-Prüfung
     if [[ -r /proc/loadavg ]]; then
         local load_1min load_5min
         read -r load_1min load_5min _ _ _ < /proc/loadavg
@@ -2995,22 +2919,56 @@ analyze_performance_enhanced() {
         
         local cpu_cores
         cpu_cores=$(nproc 2>/dev/null || echo "1")
+        cpu_cores=$(echo "${cpu_cores}" | tr -d '\n\r' | head -c 10)
+        if ! [[ "${cpu_cores}" =~ ^[0-9]+$ ]]; then
+            cpu_cores=1
+        fi
         
-        if (( $(echo "${load_1min} > ${cpu_cores} * 2" | bc -l 2>/dev/null || echo "0") )); then
-            warnings_ref+=("Sehr hohe CPU-Last: ${load_1min} (Kerne: ${cpu_cores})")
+        # KORRIGIERTE Load-Prüfung mit bc falls verfügbar
+        if command -v bc >/dev/null 2>&1; then
+            local load_threshold
+            load_threshold=$(echo "${cpu_cores} * 2" | bc 2>/dev/null || echo "2")
+            if (( $(echo "${load_1min} > ${load_threshold}" | bc -l 2>/dev/null || echo "0") )); then
+                warnings_ref+=("Sehr hohe CPU-Last: ${load_1min} (Kerne: ${cpu_cores})")
+            fi
+        else
+            # Fallback ohne bc - approximative Prüfung
+            local load_int
+            load_int=$(echo "${load_1min}" | cut -d'.' -f1)
+            if [[ "${load_int}" =~ ^[0-9]+$ ]] && [[ ${load_int} -gt $((cpu_cores * 2)) ]] 2>/dev/null; then
+                warnings_ref+=("Sehr hohe CPU-Last: ${load_1min} (Kerne: ${cpu_cores})")
+            fi
         fi
     fi
     
+    # KORRIGIERTE I/O-Wait-Prüfung
     local iowait
     iowait=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr -d '%' 2>/dev/null || echo "0")
     echo "I/O-Wait: ${iowait}%"
     
-    if (( $(echo "${iowait} > 20" | bc -l 2>/dev/null || echo "0") )); then
-        warnings_ref+=("Hohe I/O-Wait: ${iowait}%")
+    # Sichere I/O-Wait-Prüfung
+    if [[ "${iowait}" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        if command -v bc >/dev/null 2>&1; then
+            if (( $(echo "${iowait} > 20" | bc -l 2>/dev/null || echo "0") )); then
+                warnings_ref+=("Hohe I/O-Wait: ${iowait}%")
+            fi
+        else
+            # Fallback ohne bc
+            local iowait_int
+            iowait_int=$(echo "${iowait}" | cut -d'.' -f1)
+            if [[ "${iowait_int}" =~ ^[0-9]+$ ]] && [[ ${iowait_int} -gt 20 ]] 2>/dev/null; then
+                warnings_ref+=("Hohe I/O-Wait: ${iowait}%")
+            fi
+        fi
     fi
     
+    # KORRIGIERTE Offene Dateien-Prüfung
     local open_files
     open_files=$(lsof 2>/dev/null | wc -l || echo "0")
+    open_files=$(echo "${open_files}" | tr -d '\n\r' | head -c 10)
+    if ! [[ "${open_files}" =~ ^[0-9]+$ ]]; then
+        open_files=0
+    fi
     echo "Offene Dateien: ${open_files}"
     
     info_ref+=("Performance: Load ${load_1min}, I/O-Wait ${iowait}%")
