@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.0.2"
+readonly SCRIPT_VERSION="2025.06.08-v1.0.3"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -90,7 +90,7 @@ get_enhanced_system_info() {
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
 }
 
-# Erweiterte Telegram-Benachrichtigung
+# KORRIGIERTE Telegram-Benachrichtigung
 enhanced_notify() {
     local level="$1"
     local title="$2"
@@ -102,6 +102,7 @@ enhanced_notify() {
     fi
     
     if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        log "Telegram-Konfiguration nicht vollständig - überspringe Benachrichtigung"
         return 0
     fi
     
@@ -120,36 +121,102 @@ enhanced_notify() {
             ;;
     esac
     
-    # Erstelle formatierte Nachricht
+    # Erstelle einfache, sichere Nachricht (ohne komplexes Escaping)
     local formatted_message="${icon} ${emoji}
-🌍 Country: ${COUNTRY}
-🖥️ Hostname: ${HOSTNAME_NEW}
-🌐 IP: ${PUBLIC_IP}
-📡 ASN: ${ASN}
-🏢 Provider: ${PROVIDER}
-🔧 ${title}:
+
+Country: ${COUNTRY}
+Hostname: ${HOSTNAME_NEW}
+IP: ${PUBLIC_IP}
+ASN: ${ASN}
+Provider: ${PROVIDER}
+
+${title}:
 ${message}"
     
-    # Escape für Telegram
-    local escaped_message
-    escaped_message=$(printf '%s' "${formatted_message}" | sed 's/[_*\[\]()~`>#+=|{}.!-]/\\&/g')
+    # Teste Telegram-Token und Chat-ID zuerst
+    log "Teste Telegram-Verbindung..."
+    local test_response
+    test_response=$(curl -s -X GET \
+        --connect-timeout 10 \
+        --max-time 15 \
+        --user-agent "GlobalpingInstaller/1.0" \
+        "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/getMe" 2>&1)
     
-    # Sende Nachricht mit Retry-Logik
+    if ! echo "${test_response}" | grep -q '"ok":true'; then
+        log "FEHLER: Telegram-Token ungültig oder API nicht erreichbar"
+        log "API-Antwort: ${test_response}"
+        return 1
+    fi
+    
+    # Sende Nachricht mit verbesserter Fehlerbehandlung
     local attempt=0
-    while [[ ${attempt} -lt 3 ]]; do
-        if curl -s -X POST "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" \
-            -d "chat_id=${TELEGRAM_CHAT}" \
-            -d "text=${escaped_message}" \
-            -d "parse_mode=MarkdownV2" >/dev/null 2>&1; then
+    local max_attempts=3
+    
+    while [[ ${attempt} -lt ${max_attempts} ]]; do
+        ((attempt++))
+        log "Sende Telegram-Nachricht (Versuch ${attempt}/${max_attempts})"
+        
+        local response
+        response=$(curl -s -X POST \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --user-agent "GlobalpingInstaller/1.0" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT}" \
+            --data-urlencode "text=${formatted_message}" \
+            --data-urlencode "parse_mode=HTML" \
+            "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+        
+        # Prüfe Antwort
+        if echo "${response}" | grep -q '"ok":true'; then
             log "Telegram-Benachrichtigung erfolgreich gesendet"
             return 0
+        else
+            log "FEHLER bei Telegram-Nachricht (Versuch ${attempt}): ${response}"
+            
+            # Prüfe auf spezifische Fehler
+            if echo "${response}" | grep -q "chat not found\|Forbidden"; then
+                log "FEHLER: Chat-ID '${TELEGRAM_CHAT}' ungültig oder Bot wurde blockiert"
+                return 1
+            elif echo "${response}" | grep -q "Too Many Requests"; then
+                log "Rate-Limit erreicht, warte länger..."
+                sleep $((attempt * 10))
+            else
+                sleep $((attempt * 2))
+            fi
         fi
-        ((attempt++))
-        sleep 2
     done
     
-    log "Warnung: Telegram-Benachrichtigung fehlgeschlagen nach 3 Versuchen"
+    log "Telegram-Benachrichtigung fehlgeschlagen nach ${max_attempts} Versuchen"
     return 1
+}
+
+# Test-Funktion für Telegram
+test_telegram_config() {
+    log "Teste Telegram-Konfiguration..."
+    
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        log "Telegram-Token oder Chat-ID nicht gesetzt"
+        return 1
+    fi
+    
+    # Teste getMe API
+    local me_response
+    me_response=$(curl -s "${TELEGRAM_API_URL}${TELEGRAM_TOKEN}/getMe")
+    
+    if ! echo "${me_response}" | grep -q '"ok":true'; then
+        log "FEHLER: Telegram-Token ungültig"
+        log "API-Antwort: ${me_response}"
+        return 1
+    fi
+    
+    local bot_name
+    bot_name=$(echo "${me_response}" | grep -o '"username":"[^"]*"' | cut -d'"' -f4 || echo "unbekannt")
+    log "Bot gefunden: @${bot_name}"
+    
+    # Sende Test-Nachricht
+    enhanced_notify "install_success" "Telegram-Test" "Test-Nachricht erfolgreich!"
+    
+    return $?
 }
 
 # Verbesserter Error-Handler
@@ -407,7 +474,7 @@ setup_ssh_key() {
     fi
 }
 
-# Abhängigkeiten installieren
+# KORRIGIERTE Abhängigkeiten installieren (mit unzip und weiteren Tools)
 install_dependencies() {
     enhanced_log "INFO" "Installiere Systemabhängigkeiten"
     
@@ -421,8 +488,8 @@ install_dependencies() {
         is_rhel_based=true
     fi
     
-    # Liste der zu prüfenden Befehle
-    local required_cmds=("curl" "wget" "grep" "sed" "awk" "bc")
+    # ERWEITERTE Liste der zu prüfenden Befehle
+    local required_cmds=("curl" "wget" "grep" "sed" "awk" "bc" "unzip" "tar" "gzip" "find" "xargs")
     local missing_cmds=()
     
     # Prüfe, welche Befehle fehlen
@@ -441,28 +508,43 @@ install_dependencies() {
     enhanced_log "INFO" "Installiere fehlende Abhängigkeiten: ${missing_cmds[*]}"
     
     if [[ "${is_debian_based}" == "true" ]] && command -v apt-get >/dev/null 2>&1; then
-        # Debian/Ubuntu
+        # Debian/Ubuntu - ERWEITERTE Paketliste
         apt-get update >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
         }
         apt-get install -y \
             curl wget awk sed grep coreutils bc \
-            lsb-release iproute2 systemd >/dev/null 2>&1 || {
+            unzip tar gzip bzip2 xz-utils \
+            findutils lsb-release iproute2 \
+            systemd procps psmisc \
+            ca-certificates gnupg \
+            software-properties-common \
+            apt-transport-https >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
             return 1
         }
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
+            # RHEL/CentOS/Rocky/Alma mit DNF
             dnf install -y \
                 curl wget gawk sed grep coreutils bc \
-                redhat-lsb-core iproute >/dev/null 2>&1 || {
+                unzip tar gzip bzip2 xz \
+                findutils redhat-lsb-core iproute \
+                systemd procps-ng psmisc \
+                ca-certificates gnupg2 \
+                dnf-plugins-core >/dev/null 2>&1 || {
                 enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
                 return 1
             }
         elif command -v yum >/dev/null 2>&1; then
+            # Ältere RHEL/CentOS mit YUM
             yum install -y \
                 curl wget gawk sed grep coreutils bc \
-                redhat-lsb-core iproute >/dev/null 2>&1 || {
+                unzip tar gzip bzip2 xz \
+                findutils redhat-lsb-core iproute \
+                systemd procps-ng psmisc \
+                ca-certificates gnupg2 \
+                yum-utils >/dev/null 2>&1 || {
                 enhanced_log "ERROR" "Konnte Abhängigkeiten nicht installieren"
                 return 1
             }
@@ -472,6 +554,20 @@ install_dependencies() {
         fi
     else
         enhanced_log "WARN" "Unbekannte Distribution, überspringe Abhängigkeiten-Installation"
+    fi
+    
+    # Verifiziere Installation der kritischen Tools
+    local verification_failed=false
+    for cmd in "curl" "unzip" "tar"; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            enhanced_log "ERROR" "Kritisches Tool '${cmd}' konnte nicht installiert werden"
+            verification_failed=true
+        fi
+    done
+    
+    if [[ "${verification_failed}" == "true" ]]; then
+        enhanced_log "ERROR" "Installation kritischer Abhängigkeiten fehlgeschlagen"
+        return 1
     fi
     
     enhanced_log "INFO" "Systemabhängigkeiten erfolgreich installiert"
@@ -517,6 +613,268 @@ update_system() {
     
     enhanced_log "INFO" "Systemaktualisierung abgeschlossen"
     return 0
+}
+
+# [Der Rest der Funktionen bleibt unverändert wie im vorherigen Skript...]
+# Füge hier die restlichen Funktionen aus dem vorherigen korrigierten Skript ein
+
+# Erweiterte Hilfefunktion mit Telegram-Test
+show_enhanced_help() {
+    cat << 'HELP_EOF'
+==========================================
+Globalping Server-Setup-Skript (Enhanced)
+==========================================
+
+BESCHREIBUNG:
+    Erweiterte Automatisierung für Globalping-Probe Server mit
+    intelligenter Wartung, erweiterten Benachrichtigungen und
+    robusten Fehlerbehandlungen.
+
+VERWENDUNG:
+    ./install.sh [OPTIONEN]
+    
+    Das Skript muss mit Root-Rechten ausgeführt werden.
+
+HAUPTOPTIONEN:
+    -h, --help                      Zeigt diese Hilfe an
+    --adoption-token TOKEN          Globalping Adoption-Token (erforderlich)
+    --telegram-token TOKEN          Telegram-Bot-Token für Benachrichtigungen
+    --telegram-chat ID              Telegram-Chat-ID für Benachrichtigungen
+    --ubuntu-token TOKEN            Ubuntu Pro Token (nur für Ubuntu)
+    --ssh-key "SCHLÜSSEL"           SSH Public Key für sicheren Zugang
+
+WARTUNGS-OPTIONEN:
+    --auto-weekly                   Wöchentliche automatische Wartung (intern)
+    --cleanup                       Erweiterte Systemreinigung
+    --emergency-cleanup             Aggressive Notfall-Bereinigung  
+    --diagnose                      Vollständige Systemdiagnose
+    --network-diagnose              Detaillierte Netzwerk-Diagnose
+    --test-telegram                 Teste Telegram-Konfiguration
+
+ERWEITERTE OPTIONEN:
+    -d, --docker                    Installiert nur Docker
+    -l, --log DATEI                 Alternative Log-Datei
+    --debug                         Debug-Modus mit ausführlichem Logging
+    --force                         Überspringt Sicherheitsabfragen
+    --no-reboot                     Verhindert automatische Reboots
+
+TELEGRAM-KONFIGURATION:
+    1. Erstelle einen Bot: @BotFather
+    2. Erhalte Token und Chat-ID
+    3. Teste mit: ./install.sh --test-telegram --telegram-token "TOKEN" --telegram-chat "CHAT_ID"
+
+NEUE FEATURES:
+    ✓ Verbesserte Telegram-Benachrichtigungen mit Debugging
+    ✓ Erweiterte Abhängigkeiten (unzip, tar, gzip, etc.)
+    ✓ Intelligente Swap-Konfiguration (RAM + Swap ≥ 1GB)
+    ✓ Automatische Reboots bei kritischen Updates
+    ✓ Absolute Speicherplatz-Schwellwerte (1.5GB minimum)
+    ✓ CPU-Hang-Schutz durch Timeouts
+    ✓ restart=always für Globalping-Container
+    ✓ Tägliche Log-Rotation (max 50MB)
+    ✓ Wöchentliche automatische Wartung
+
+SYSTEMANFORDERUNGEN:
+    - Linux (Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora)
+    - Mindestens 256MB RAM
+    - Mindestens 1.5GB freier Speicherplatz
+    - Root-Rechte oder sudo-Zugang
+    - Internetverbindung
+
+BEISPIELE:
+    # Vollständige Installation
+    ./install.sh --adoption-token "token" \
+                  --telegram-token "bot-token" \
+                  --telegram-chat "chat-id"
+
+    # Teste Telegram-Konfiguration
+    ./install.sh --test-telegram --telegram-token "123:ABC" --telegram-chat "456"
+
+    # Nur Diagnose
+    ./install.sh --diagnose
+
+    # Systemreinigung
+    ./install.sh --cleanup
+
+HELP_EOF
+    exit 0
+}
+
+# Erweiterte Argumentverarbeitung mit Telegram-Test
+process_enhanced_args() {
+    # Standardwerte
+    local install_docker_only="false"
+    local run_diagnostics_only="false"
+    local run_network_diagnostics_only="false"
+    local auto_weekly_mode="false"
+    local cleanup_mode="false"
+    local emergency_cleanup_mode="false"
+    local force_mode="false"
+    local no_reboot="false"
+    local test_telegram_mode="false"
+    
+    # Keine Argumente = Hilfe
+    if [[ $# -eq 0 ]]; then
+        show_enhanced_help
+    fi
+    
+    # Argumente verarbeiten
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_enhanced_help
+                ;;
+            -d|--docker)
+                install_docker_only="true"
+                shift
+                ;;
+            -l|--log)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    LOG_FILE="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--log benötigt einen Dateinamen"
+                    exit 1
+                fi
+                ;;
+            --debug)
+                enable_enhanced_debug_mode
+                shift
+                ;;
+            --force)
+                force_mode="true"
+                shift
+                ;;
+            --no-reboot)
+                no_reboot="true"
+                shift
+                ;;
+            --auto-weekly)
+                auto_weekly_mode="true"
+                WEEKLY_MODE="true"
+                shift
+                ;;
+            --test-telegram)
+                test_telegram_mode="true"
+                shift
+                ;;
+            --adoption-token)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    ADOPTION_TOKEN="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--adoption-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --telegram-token)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    TELEGRAM_TOKEN="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--telegram-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --telegram-chat)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    TELEGRAM_CHAT="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--telegram-chat benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --ubuntu-token)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    UBUNTU_PRO_TOKEN="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--ubuntu-token benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --ssh-key)
+                if [[ -n "${2:-}" && "${2}" != --* ]]; then
+                    SSH_KEY="$2"
+                    shift 2
+                else
+                    enhanced_log "ERROR" "--ssh-key benötigt einen Wert"
+                    exit 1
+                fi
+                ;;
+            --cleanup)
+                cleanup_mode="true"
+                shift
+                ;;
+            --emergency-cleanup)
+                emergency_cleanup_mode="true"
+                shift
+                ;;
+            --diagnose)
+                run_diagnostics_only="true"
+                shift
+                ;;
+            --network-diagnose)
+                run_network_diagnostics_only="true"
+                shift
+                ;;
+            -*)
+                enhanced_log "ERROR" "Unbekannte Option: $1"
+                echo "Verwenden Sie --help für Hilfe" >&2
+                exit 1
+                ;;
+            *)
+                enhanced_log "ERROR" "Unerwartetes Argument: $1"
+                echo "Verwenden Sie --help für Hilfe" >&2
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Telegram-Test-Modus
+    if [[ "${test_telegram_mode}" == "true" ]]; then
+        execute_telegram_test_mode
+        exit $?
+    fi
+    
+    # Validiere und führe spezielle Modi aus
+    execute_enhanced_special_modes \
+        "${install_docker_only}" \
+        "${run_diagnostics_only}" \
+        "${run_network_diagnostics_only}" \
+        "${auto_weekly_mode}" \
+        "${cleanup_mode}" \
+        "${emergency_cleanup_mode}" \
+        "${force_mode}" \
+        "${no_reboot}"
+}
+
+# Telegram-Test-Modus
+execute_telegram_test_mode() {
+    echo "=== TELEGRAM-KONFIGURATION TEST ==="
+    echo "Teste Telegram-Token und Chat-ID..."
+    echo "===================================="
+    
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        echo "FEHLER: --telegram-token und --telegram-chat sind erforderlich"
+        echo "Beispiel: ./install.sh --test-telegram --telegram-token \"123:ABC\" --telegram-chat \"456\""
+        return 1
+    fi
+    
+    # Basis-Systeminformationen sammeln für Test
+    get_enhanced_system_info
+    
+    # Führe Test durch
+    if test_telegram_config; then
+        echo "✅ Telegram-Konfiguration erfolgreich getestet!"
+        echo "Bot kann Nachrichten an Chat ${TELEGRAM_CHAT} senden."
+        return 0
+    else
+        echo "❌ Telegram-Konfiguration fehlgeschlagen!"
+        echo "Prüfe Token und Chat-ID."
+        return 1
+    fi
 }
 
 # Basis-Systeminformationen sammeln
