@@ -79,13 +79,13 @@ get_enhanced_system_info() {
     [[ -z "${PROVIDER}" ]] && PROVIDER="unknown"
     
     # Hostname ermitteln - INTELLIGENTER HOSTNAME
-if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
-    HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
-    HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-\|-$//g')
-    HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | cut -c1-63)
-else
-    HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-$(date +%s)")
-fi
+    if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
+        HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
+        HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-\|-$//g')
+        HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | cut -c1-63)
+    else
+        HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-$(date +%s)")
+    fi
     
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
 }
@@ -265,7 +265,7 @@ rotate_logs_if_needed() {
     fi
 }
 
-# Install sudo (KORRIGIERT - Funktion hinzugefügt)
+# Install sudo
 install_sudo() {
     log "Prüfe sudo-Installation"
     
@@ -291,7 +291,7 @@ install_sudo() {
     return $?
 }
 
-# Configure hostname (KORRIGIERT - Funktion hinzugefügt)
+# Configure hostname
 configure_hostname() {
     log "Konfiguriere Hostname"
     
@@ -328,6 +328,7 @@ configure_hostname() {
     
     return 0
 }
+
 # Ubuntu Pro Aktivierung
 ubuntu_pro_attach() {
     if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
@@ -739,7 +740,8 @@ configure_smart_swap() {
     log "Swap erfolgreich konfiguriert: ${swap_size_mb}MB"
     return 0
 }
-# Prüfung auf kritische Updates und Reboot-Notwendigkeit (KORRIGIERT)
+
+# Prüfung auf kritische Updates und Reboot-Notwendigkeit
 check_critical_updates() {
     log "Prüfe auf kritische Updates"
     
@@ -754,9 +756,8 @@ check_critical_updates() {
         fi
         
         # Prüfe auf Kernel-Updates
-        local kernel_updates=0
+        local kernel_updates
         kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image\|linux-generic\|linux-headers" 2>/dev/null || echo "0")
-kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | head -1)
         
         if [[ "${kernel_updates}" -gt 0 ]]; then
             log "Kernel-Updates gefunden: ${kernel_updates}"
@@ -764,9 +765,8 @@ kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | head -1)
         fi
         
         # Prüfe auf kritische System-Updates  
-        local critical_updates=0
+        local critical_updates
         critical_updates=$(apt list --upgradable 2>/dev/null | grep -c "systemd\|libc6\|openssh\|glibc" 2>/dev/null || echo "0")
-critical_updates=$(echo "${critical_updates}" | tr -d '\n\r' | head -1)
         
         if [[ "${critical_updates}" -gt 0 ]]; then
             log "Kritische System-Updates gefunden: ${critical_updates}"
@@ -786,7 +786,7 @@ critical_updates=$(echo "${critical_updates}" | tr -d '\n\r' | head -1)
         
     # Für RHEL/CentOS/Fedora
     elif command -v dnf >/dev/null 2>&1; then
-        local kernel_updates=0
+        local kernel_updates
         kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" 2>/dev/null || echo "0")
         
         if [[ "${kernel_updates}" -gt 0 ]]; then
@@ -1177,7 +1177,7 @@ verify_enhanced_globalping_probe() {
     return 0
 }
 
-# KORRIGIERT - Funktion hinzugefügt
+# Erweiterte Globalping-Wartung erstellen
 create_enhanced_globalping_maintenance() {
     log "Erstelle erweiterte Globalping-Wartung"
     
@@ -1187,13 +1187,14 @@ create_enhanced_globalping_maintenance() {
     
     return 0
 }
+
 # Wöchentlicher automatischer Modus
 run_weekly_maintenance() {
     log "Starte wöchentliche automatische Wartung"
     
     WEEKLY_MODE="true"
     
-    # Phase 1: Skript-Update (KORRIGIERT)
+    # Phase 1: Skript-Update
     log "Phase 1: Skript-Update"
     if ! perform_enhanced_auto_update; then
         enhanced_log "WARN" "Auto-Update fehlgeschlagen"
@@ -1490,7 +1491,7 @@ perform_log_rotation() {
     find /var/log -name "*.1" -o -name "*.2" -o -name "*.old" -o -name "*.gz" -mtime +7 -delete 2>/dev/null || true
 }
 
-# KORRIGIERT - Emergency Cleanup Funktion hinzugefügt
+# Emergency Cleanup Funktion
 perform_emergency_cleanup() {
     log "Führe Notfall-Bereinigung durch"
     
@@ -1540,6 +1541,7 @@ perform_emergency_cleanup() {
     log "Notfall-Bereinigung abgeschlossen"
     return 0
 }
+
 # Erweiterte Auto-Update-Einrichtung
 setup_enhanced_auto_update() {
     log "Richte erweiterte automatische Updates ein"
@@ -1712,7 +1714,7 @@ remove_old_enhanced_schedulers() {
     rm -f "/etc/cron.weekly/globalping-update" 2>/dev/null || true
 }
 
-# Erweiterte Auto-Update-Ausführung (KORRIGIERT)
+# Erweiterte Auto-Update-Ausführung
 perform_enhanced_auto_update() {
     log "Führe erweiterte automatische Aktualisierung durch"
     
@@ -2063,6 +2065,7 @@ process_enhanced_args() {
         "${force_mode}" \
         "${no_reboot}"
 }
+
 # Führe erweiterte spezielle Modi aus
 execute_enhanced_special_modes() {
     local install_docker_only="$1"
@@ -2094,7 +2097,7 @@ execute_enhanced_special_modes() {
         exit 1
     }
     
-    # Temporäres Verzeichnis für alle Modi (KORRIGIERT)
+    # Temporäres Verzeichnis für alle Modi
     create_temp_dir || {
         enhanced_log "ERROR" "Konnte temporäres Verzeichnis nicht erstellen"
         exit 1
@@ -2462,6 +2465,7 @@ analyze_network_enhanced() {
         info_ref+=("Internet-Konnektivität verfügbar")
     fi
 }
+
 # Erweiterte Docker-Analyse
 analyze_docker_enhanced() {
     local -n issues_ref=$1
@@ -2558,7 +2562,6 @@ analyze_globalping_enhanced() {
             # API-Verbindung prüfen
             local api_connection
             api_connection=$(docker logs --tail 50 "${container_name}" 2>&1 | grep -c "Connection to API established\|Connected from" 2>/dev/null || echo "0")
-api_connection=$(echo "${api_connection}" | tr -d '\n\r' | head -1)
             if [[ ${api_connection} -gt 0 ]]; then
                 info_ref+=("Globalping-Probe: API-Verbindung aktiv")
             else
@@ -2895,6 +2898,7 @@ install_docker() {
     enhanced_log "INFO" "Docker erfolgreich installiert und konfiguriert"
     return 0
 }
+
 # Docker für Debian/Ubuntu
 install_docker_debian_ubuntu() {
     local distro="$1"
@@ -3258,7 +3262,7 @@ create_temp_dir() {
     return 0
 }
 
-# Erweiterte Hauptfunktion (KORRIGIERT)
+# Erweiterte Hauptfunktion
 enhanced_main() {
     local start_time
     start_time=$(date +%s)
@@ -3284,7 +3288,6 @@ enhanced_main() {
     
     install_sudo || enhanced_log "WARN" "sudo-Installation fehlgeschlagen"
     
-    # KORRIGIERT: Entferne timeout-Aufrufe
     if ! install_dependencies; then
         enhanced_log "WARN" "Abhängigkeiten-Installation teilweise fehlgeschlagen"
     fi
@@ -3395,17 +3398,8 @@ enhanced_main() {
     enhanced_log "INFO" "=============================================="
     
     # Erfolgreiche Installation-Benachrichtigung
-   if [[ "${WEEKLY_MODE}" != "true" ]]; then
-    enhanced_log "INFO" "Sende install_success Nachricht (WEEKLY_MODE=${WEEKLY_MODE})"
-    enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
-
-Konfigurierte Features:
-${ADOPTION_TOKEN:+✓ Globalping-Probe}
-${TELEGRAM_TOKEN:+✓ Telegram-Benachrichtigungen}
-${SSH_KEY:+✓ SSH-Zugang}
-✓ Automatische Wartung
-✓ Intelligente Swap-Konfiguration"
-fi
+    if [[ "${WEEKLY_MODE}" != "true" ]]; then
+        enhanced_notify "install_success" "Installation abgeschlossen" "Server erfolgreich eingerichtet in ${duration} Sekunden.
 
 Konfigurierte Features:
 ${ADOPTION_TOKEN:+✓ Globalping-Probe}
@@ -3446,7 +3440,7 @@ create_enhanced_summary() {
     return 0
 }
 
-# Erweiterte Initialisierung (KORRIGIERT)
+# Erweiterte Initialisierung
 initialize_enhanced_script() {
     # Sichere Umgebung
     umask 022
