@@ -1099,7 +1099,7 @@ configure_smart_swap() {
     return 0
 }
 
-# Prüfung auf kritische Updates und Reboot-Notwendigkeit
+# Prüfung auf kritische Updates und Reboot-Notwendigkeit (KORRIGIERT)
 check_critical_updates() {
     log "Prüfe auf kritische Updates"
     
@@ -1113,26 +1113,30 @@ check_critical_updates() {
             return 0
         fi
         
-        # Prüfe auf Kernel-Updates
+        # Prüfe auf Kernel-Updates - KORRIGIERT
         local kernel_updates
-        kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image\|linux-generic\|linux-headers" 2>/dev/null || echo "0")
+        kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image\|linux-generic\|linux-headers" || echo "0")
+        # Bereinige Output - entferne Newlines und Carriage Returns
+        kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | awk '{print $1}')
         
-        if [[ "${kernel_updates}" -gt 0 ]]; then
+        if [[ "${kernel_updates}" -gt 0 ]] 2>/dev/null; then
             log "Kernel-Updates gefunden: ${kernel_updates}"
             needs_reboot=true
         fi
         
-        # Prüfe auf kritische System-Updates  
+        # Prüfe auf kritische System-Updates - KORRIGIERT
         local critical_updates
-        critical_updates=$(apt list --upgradable 2>/dev/null | grep -c "systemd\|libc6\|openssh\|glibc" 2>/dev/null || echo "0")
+        critical_updates=$(apt list --upgradable 2>/dev/null | grep -c "systemd\|libc6\|openssh\|glibc" || echo "0")
+        # Bereinige Output - entferne Newlines und Carriage Returns
+        critical_updates=$(echo "${critical_updates}" | tr -d '\n\r' | awk '{print $1}')
         
-        if [[ "${critical_updates}" -gt 0 ]]; then
+        if [[ "${critical_updates}" -gt 0 ]] 2>/dev/null; then
             log "Kritische System-Updates gefunden: ${critical_updates}"
             needs_reboot=true
         fi
         
         # Führe Updates durch
-        if [[ "${kernel_updates}" -gt 0 ]] || [[ "${critical_updates}" -gt 0 ]]; then
+        if [[ "${kernel_updates}" -gt 0 ]] 2>/dev/null || [[ "${critical_updates}" -gt 0 ]] 2>/dev/null; then
             log "Installiere kritische Updates..."
             if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
                 log "Updates erfolgreich installiert"
@@ -1145,9 +1149,10 @@ check_critical_updates() {
     # Für RHEL/CentOS/Fedora
     elif command -v dnf >/dev/null 2>&1; then
         local kernel_updates
-        kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" 2>/dev/null || echo "0")
+        kernel_updates=$(dnf check-update kernel* 2>/dev/null | grep -c "kernel" || echo "0")
+        kernel_updates=$(echo "${kernel_updates}" | tr -d '\n\r' | awk '{print $1}')
         
-        if [[ "${kernel_updates}" -gt 0 ]]; then
+        if [[ "${kernel_updates}" -gt 0 ]] 2>/dev/null; then
             log "Kernel-Updates gefunden, installiere..."
             if timeout "${TIMEOUT_PACKAGE}" dnf update -y kernel* >/dev/null 2>&1; then
                 needs_reboot=true
@@ -2917,10 +2922,13 @@ analyze_globalping_enhanced() {
                 fi
             fi
             
-            # API-Verbindung prüfen
+            # API-Verbindung prüfen - KORRIGIERT
             local api_connection
-            api_connection=$(docker logs --tail 50 "${container_name}" 2>&1 | grep -c "Connection to API established\|Connected from" 2>/dev/null || echo "0")
-            if [[ ${api_connection} -gt 0 ]]; then
+            api_connection=$(docker logs --tail 50 "${container_name}" 2>&1 | grep -c "Connection to API established\|Connected from" || echo "0")
+            # Bereinige Output
+            api_connection=$(echo "${api_connection}" | tr -d '\n\r' | awk '{print $1}')
+            
+            if [[ "${api_connection}" -gt 0 ]] 2>/dev/null; then
                 info_ref+=("Globalping-Probe: API-Verbindung aktiv")
             else
                 warnings_ref+=("Globalping-Probe: Keine API-Verbindung erkannt")
