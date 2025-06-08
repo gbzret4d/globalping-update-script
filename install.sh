@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.08-v1.2.0"
+readonly SCRIPT_VERSION="2025.06.08-v1.4.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -51,7 +51,7 @@ PROVIDER=""
 # FUNKTIONEN
 # =============================================
 
-# Erweiterte Systeminfo-Sammlung
+# Erweiterte Systeminformationen sammeln
 get_enhanced_system_info() {
     log "Sammle erweiterte Systeminformationen"
     
@@ -90,7 +90,68 @@ get_enhanced_system_info() {
     log "System-Info: ${COUNTRY}, ${PUBLIC_IP}, ${ASN}, ${PROVIDER}"
 }
 
-# OPTIMIERTE Telegram-Benachrichtigung mit integrierten Links
+# Verbesserte Logging-Funktion
+enhanced_log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    # Log-Level-Mapping
+    local level_prefix
+    case "${level}" in
+        "ERROR") level_prefix="❌ [ERROR]" ;;
+        "WARN")  level_prefix="⚠️  [WARN]" ;;
+        "INFO")  level_prefix="ℹ️  [INFO]" ;;
+        "DEBUG") level_prefix="🔍 [DEBUG]" ;;
+        *) level_prefix="📝 [${level}]" ;;
+    esac
+    
+    # Stelle sicher, dass Log-Verzeichnis existiert
+    mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+    
+    # Schreibe Log
+    echo "[${timestamp}] ${level_prefix} ${message}" | tee -a "${LOG_FILE}" 2>/dev/null || {
+        echo "[${timestamp}] ${level_prefix} ${message}" >&2
+    }
+    
+    # Log-Rotation prüfen
+    rotate_logs_if_needed
+}
+
+# Wrapper für bestehende log-Funktion
+log() {
+    enhanced_log "INFO" "$1"
+}
+
+# Log-Rotation
+rotate_logs_if_needed() {
+    if [[ ! -f "${LOG_FILE}" ]]; then
+        return 0
+    fi
+    
+    local log_size_mb
+    log_size_mb=$(stat -f%z "${LOG_FILE}" 2>/dev/null || stat -c%s "${LOG_FILE}" 2>/dev/null || echo "0")
+    log_size_mb=$((log_size_mb / 1024 / 1024))
+    
+    if [[ ${log_size_mb} -gt ${MAX_LOG_SIZE_MB} ]]; then
+        # Rotiere Log
+        local backup_log="${LOG_FILE}.$(date +%Y%m%d)"
+        mv "${LOG_FILE}" "${backup_log}"
+        touch "${LOG_FILE}"
+        chmod 644 "${LOG_FILE}"
+        
+        # Komprimiere alte Logs
+        gzip "${backup_log}" 2>/dev/null || true
+        
+        # Entferne Logs älter als 30 Tage
+        find "$(dirname "${LOG_FILE}")" -name "globalping-install.log.*.gz" -mtime +30 -delete 2>/dev/null || true
+        
+        enhanced_log "INFO" "Log-Datei rotiert (${log_size_mb}MB -> 0MB)"
+    fi
+}
+
+# KORRIGIERTE Telegram-Benachrichtigung
 enhanced_notify() {
     local level="$1"
     local title="$2"
@@ -190,23 +251,26 @@ ${message}
 📊 Logs: /var/log/globalping-install.log"
 
     elif [[ "${level}" == "error" ]]; then
-        # Kompakte Fehler-Nachricht mit Links für Debug
+        # KORRIGIERTE Fehler-Nachricht
         local system_status error_context
         
-        system_status=$(printf "RAM: %s | HDD: %s | Load: %s" \
-            "$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")" \
-            "$(df -h / 2>/dev/null | awk 'NR==2 {print $4" frei"}' || echo "?")" \
-            "$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "?")")
+        # VERBESSERTE System-Status-Sammlung
+        local ram_status disk_status load_status
+        ram_status=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
+        disk_status=$(df -h / 2>/dev/null | awk 'NR==2 {print $4" frei"}' || echo "unbekannt")
+        load_status=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "unbekannt")
+        
+        system_status="RAM: ${ram_status} | HDD: ${disk_status} | Load: ${load_status}"
         
         # Letzte relevante Log-Einträge
         error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -2 | sed 's/^.*] //' || echo "Keine Details verfügbar")
         
-        # Kompakte Fehler-Nachricht mit integrierten Links
+        # KORRIGIERTE Fehler-Nachricht (ohne problematische Markdown)
         extended_message="${icon} ${emoji}
 
-🌍 SERVER: ${COUNTRY} | [${PUBLIC_IP}](https://ipinfo.io/${PUBLIC_IP})
+🌍 SERVER: ${COUNTRY} | ${PUBLIC_IP}
 🏠 Host: ${HOSTNAME_NEW}
-🏢 [${PROVIDER}](https://ipinfo.io/${ASN}) ([${ASN}](https://bgp.he.net/${ASN}))
+🏢 ${PROVIDER} (${ASN})
 
 🚨 FEHLER-DETAILS:
 ${title}: ${message}
@@ -216,11 +280,11 @@ ${title}: ${message}
 📋 KONTEXT:
 ${error_context}
 
-🔧 Zugang: \`ssh root@${PUBLIC_IP}\`
-📊 Logs: \`tail -50 /var/log/globalping-install.log\`"
+🔧 Zugang: ssh root@${PUBLIC_IP}
+📊 Logs: tail -50 /var/log/globalping-install.log"
     fi
     
-    log "Sende erweiterte Telegram-Nachricht mit Links (${#extended_message} Zeichen)..."
+    log "Sende erweiterte Telegram-Nachricht (${#extended_message} Zeichen)..."
     
     # Debug: Zeige die ersten 200 Zeichen der Nachricht
     log "DEBUG: Nachricht-Anfang: $(echo "${extended_message}" | head -c 200)..."
@@ -234,15 +298,26 @@ ${error_context}
 ...Nachricht gekürzt - Details via SSH"
     fi
     
-    # Sende mit Markdown-Parsing für klickbare Links
+    # KORRIGIERT: Sende OHNE Markdown bei Fehlern (verhindert API-Probleme)
     local result
-    result=$(curl -s -X POST \
-        --connect-timeout 10 \
-        --max-time 15 \
-        -d "chat_id=${TELEGRAM_CHAT}" \
-        -d "text=${extended_message}" \
-        -d "parse_mode=Markdown" \
-        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    if [[ "${level}" == "install_success" ]]; then
+        # Success-Nachrichten mit Markdown-Links
+        result=$(curl -s -X POST \
+            --connect-timeout 10 \
+            --max-time 15 \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${extended_message}" \
+            -d "parse_mode=Markdown" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    else
+        # Fehler-Nachrichten OHNE Markdown (sicherer)
+        result=$(curl -s -X POST \
+            --connect-timeout 10 \
+            --max-time 15 \
+            -d "chat_id=${TELEGRAM_CHAT}" \
+            -d "text=${extended_message}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    fi
     
     # Debug: Zeige curl-Ergebnis
     log "DEBUG: Curl-Ergebnis: ${result}"
@@ -250,11 +325,11 @@ ${error_context}
     if echo "${result}" | grep -q '"ok":true'; then
         local message_id
         message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
-        log "Erweiterte Telegram-Nachricht mit Links erfolgreich gesendet (ID: ${message_id})"
+        log "Telegram-Nachricht erfolgreich gesendet (ID: ${message_id})"
         return 0
     else
         # Detailliertes Fehler-Logging
-        log "Telegram-API Fehler mit Markdown: ${result}"
+        log "Telegram-API Fehler: ${result}"
         
         # Fallback: Ohne Markdown-Parsing
         log "Sende Fallback ohne Markdown..."
@@ -287,15 +362,52 @@ ${error_context}
     fi
 }
 
-# Test-Funktion für die erweiterte Benachrichtigung
-test_extended_telegram() {
-    log "Teste erweiterte Telegram-Benachrichtigung..."
+# Test-Funktion für Telegram-Konfiguration
+test_telegram_config() {
+    log "Teste Telegram-Konfiguration..."
     
-    # Sammle Systeminfo
-    get_enhanced_system_info
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        echo "FEHLER: Telegram-Token oder Chat-ID fehlt"
+        return 1
+    fi
     
-    # Teste Success-Nachricht
-    enhanced_notify "install_success" "Test-Installation" "Dies ist eine Test-Nachricht mit allen Details des Servers."
+    local test_message="🧪 TEST-NACHRICHT
+
+✅ Telegram-Konfiguration funktioniert!
+🤖 Bot-Token: ${TELEGRAM_TOKEN:0:20}...
+💬 Chat-ID: ${TELEGRAM_CHAT}
+⏰ Zeitpunkt: $(date)
+
+Dieser Test bestätigt, dass Ihr Bot erfolgreich Nachrichten senden kann."
+    
+    local result
+    result=$(curl -s -X POST \
+        --connect-timeout 10 \
+        --max-time 15 \
+        -d "chat_id=${TELEGRAM_CHAT}" \
+        -d "text=${test_message}" \
+        "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
+    
+    if echo "${result}" | grep -q '"ok":true'; then
+        local message_id
+        message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
+        echo "✅ Test-Nachricht erfolgreich gesendet (Message-ID: ${message_id})"
+        return 0
+    else
+        echo "❌ Test-Nachricht fehlgeschlagen:"
+        echo "API-Antwort: ${result}"
+        
+        # Analysiere häufige Fehler
+        if echo "${result}" | grep -q "bot was blocked"; then
+            echo "TIPP: Bot wurde blockiert - entsperren Sie den Bot in Telegram"
+        elif echo "${result}" | grep -q "chat not found"; then
+            echo "TIPP: Chat-ID ungültig - prüfen Sie die Chat-ID"
+        elif echo "${result}" | grep -q "Unauthorized"; then
+            echo "TIPP: Bot-Token ungültig - prüfen Sie den Token"
+        fi
+        
+        return 1
+    fi
 }
 
 # Verbesserter Error-Handler
@@ -306,19 +418,40 @@ enhanced_error_handler() {
     
     log "KRITISCHER FEHLER: ${error_msg}"
     
-    # Sammle Debug-Informationen
-    local debug_info=""
-    debug_info+="Letzte Befehle: $(history | tail -3 | tr '\n' '; ')
-"
-    debug_info+="Speicher: $(free -h | grep Mem | awk '{print $3"/"$2}')
-"
-    debug_info+="Festplatte: $(df -h / | awk 'NR==2 {print $3"/"$2" ("$5")"}')
-"
+    # Prüfe, ob bereits eine Telegram-Nachricht in den letzten 60 Sekunden gesendet wurde
+    local last_telegram_file="/tmp/last_telegram_notification"
+    local current_time=$(date +%s)
+    local send_telegram=true
     
-    enhanced_notify "error" "Fehlermeldung" "${error_msg}
+    if [[ -f "${last_telegram_file}" ]]; then
+        local last_time
+        last_time=$(cat "${last_telegram_file}" 2>/dev/null || echo "0")
+        local time_diff=$((current_time - last_time))
+        
+        if [[ ${time_diff} -lt 60 ]]; then
+            log "Telegram-Nachricht vor ${time_diff}s gesendet - überspringe doppelte Benachrichtigung"
+            send_telegram=false
+        fi
+    fi
+    
+    if [[ "${send_telegram}" == "true" ]]; then
+        # Sammle Debug-Informationen
+        local debug_info=""
+        debug_info+="Letzte Befehle: $(history | tail -3 | tr '\n' '; ')
+"
+        debug_info+="Speicher: $(free -h | grep Mem | awk '{print $3"/"$2}')
+"
+        debug_info+="Festplatte: $(df -h / | awk 'NR==2 {print $3"/"$2" ("$5")"}')
+"
+        
+        enhanced_notify "error" "Fehlermeldung" "${error_msg}
 
 Debug-Info:
 ${debug_info}"
+        
+        # Markiere, dass Telegram-Nachricht gesendet wurde
+        echo "${current_time}" > "${last_telegram_file}"
+    fi
     
     # Cleanup
     cleanup_on_error
@@ -348,67 +481,6 @@ cleanup_on_error() {
     # Entferne Lock-Files
     rm -f "/var/lock/globalping-install-enhanced.lock" 2>/dev/null || true
     rm -f "/tmp/globalping_auto_update.lock" 2>/dev/null || true
-}
-
-# Verbesserte Logging-Funktion
-enhanced_log() {
-    local level="$1"
-    local message="$2"
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    # Log-Level-Mapping
-    local level_prefix
-    case "${level}" in
-        "ERROR") level_prefix="❌ [ERROR]" ;;
-        "WARN")  level_prefix="⚠️  [WARN]" ;;
-        "INFO")  level_prefix="ℹ️  [INFO]" ;;
-        "DEBUG") level_prefix="🔍 [DEBUG]" ;;
-        *) level_prefix="📝 [${level}]" ;;
-    esac
-    
-    # Stelle sicher, dass Log-Verzeichnis existiert
-    mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
-    
-    # Schreibe Log
-    echo "[${timestamp}] ${level_prefix} ${message}" | tee -a "${LOG_FILE}" 2>/dev/null || {
-        echo "[${timestamp}] ${level_prefix} ${message}" >&2
-    }
-    
-    # Log-Rotation prüfen
-    rotate_logs_if_needed
-}
-
-# Wrapper für bestehende log-Funktion
-log() {
-    enhanced_log "INFO" "$1"
-}
-
-# Log-Rotation
-rotate_logs_if_needed() {
-    if [[ ! -f "${LOG_FILE}" ]]; then
-        return 0
-    fi
-    
-    local log_size_mb
-    log_size_mb=$(stat -f%z "${LOG_FILE}" 2>/dev/null || stat -c%s "${LOG_FILE}" 2>/dev/null || echo "0")
-    log_size_mb=$((log_size_mb / 1024 / 1024))
-    
-    if [[ ${log_size_mb} -gt ${MAX_LOG_SIZE_MB} ]]; then
-        # Rotiere Log
-        local backup_log="${LOG_FILE}.$(date +%Y%m%d)"
-        mv "${LOG_FILE}" "${backup_log}"
-        touch "${LOG_FILE}"
-        chmod 644 "${LOG_FILE}"
-        
-        # Komprimiere alte Logs
-        gzip "${backup_log}" 2>/dev/null || true
-        
-        # Entferne Logs älter als 30 Tage
-        find "$(dirname "${LOG_FILE}")" -name "globalping-install.log.*.gz" -mtime +30 -delete 2>/dev/null || true
-        
-        enhanced_log "INFO" "Log-Datei rotiert (${log_size_mb}MB -> 0MB)"
-    fi
 }
 
 # Install sudo
@@ -694,278 +766,6 @@ update_system() {
     return 0
 }
 
-# [Der Rest der Funktionen bleibt unverändert wie im vorherigen Skript...]
-# Füge hier die restlichen Funktionen aus dem vorherigen korrigierten Skript ein
-
-# Erweiterte Hilfefunktion mit Telegram-Test
-show_enhanced_help() {
-    cat << 'HELP_EOF'
-==========================================
-Globalping Server-Setup-Skript (Enhanced)
-==========================================
-
-BESCHREIBUNG:
-    Erweiterte Automatisierung für Globalping-Probe Server mit
-    intelligenter Wartung, erweiterten Benachrichtigungen und
-    robusten Fehlerbehandlungen.
-
-VERWENDUNG:
-    ./install.sh [OPTIONEN]
-    
-    Das Skript muss mit Root-Rechten ausgeführt werden.
-
-HAUPTOPTIONEN:
-    -h, --help                      Zeigt diese Hilfe an
-    --adoption-token TOKEN          Globalping Adoption-Token (erforderlich)
-    --telegram-token TOKEN          Telegram-Bot-Token für Benachrichtigungen
-    --telegram-chat ID              Telegram-Chat-ID für Benachrichtigungen
-    --ubuntu-token TOKEN            Ubuntu Pro Token (nur für Ubuntu)
-    --ssh-key "SCHLÜSSEL"           SSH Public Key für sicheren Zugang
-
-WARTUNGS-OPTIONEN:
-    --auto-weekly                   Wöchentliche automatische Wartung (intern)
-    --cleanup                       Erweiterte Systemreinigung
-    --emergency-cleanup             Aggressive Notfall-Bereinigung  
-    --diagnose                      Vollständige Systemdiagnose
-    --network-diagnose              Detaillierte Netzwerk-Diagnose
-    --test-telegram                 Teste Telegram-Konfiguration
-
-ERWEITERTE OPTIONEN:
-    -d, --docker                    Installiert nur Docker
-    -l, --log DATEI                 Alternative Log-Datei
-    --debug                         Debug-Modus mit ausführlichem Logging
-    --force                         Überspringt Sicherheitsabfragen
-    --no-reboot                     Verhindert automatische Reboots
-
-TELEGRAM-KONFIGURATION:
-    1. Erstelle einen Bot: @BotFather
-    2. Erhalte Token und Chat-ID
-    3. Teste mit: ./install.sh --test-telegram --telegram-token "TOKEN" --telegram-chat "CHAT_ID"
-
-NEUE FEATURES:
-    ✓ Verbesserte Telegram-Benachrichtigungen mit Debugging
-    ✓ Erweiterte Abhängigkeiten (unzip, tar, gzip, etc.)
-    ✓ Intelligente Swap-Konfiguration (RAM + Swap ≥ 1GB)
-    ✓ Automatische Reboots bei kritischen Updates
-    ✓ Absolute Speicherplatz-Schwellwerte (1.5GB minimum)
-    ✓ CPU-Hang-Schutz durch Timeouts
-    ✓ restart=always für Globalping-Container
-    ✓ Tägliche Log-Rotation (max 50MB)
-    ✓ Wöchentliche automatische Wartung
-
-SYSTEMANFORDERUNGEN:
-    - Linux (Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora)
-    - Mindestens 256MB RAM
-    - Mindestens 1.5GB freier Speicherplatz
-    - Root-Rechte oder sudo-Zugang
-    - Internetverbindung
-
-BEISPIELE:
-    # Vollständige Installation
-    ./install.sh --adoption-token "token" \
-                  --telegram-token "bot-token" \
-                  --telegram-chat "chat-id"
-
-    # Teste Telegram-Konfiguration
-    ./install.sh --test-telegram --telegram-token "123:ABC" --telegram-chat "456"
-
-    # Nur Diagnose
-    ./install.sh --diagnose
-
-    # Systemreinigung
-    ./install.sh --cleanup
-
-HELP_EOF
-    exit 0
-}
-
-# Erweiterte Argumentverarbeitung mit Telegram-Test
-process_enhanced_args() {
-    # Standardwerte
-    local install_docker_only="false"
-    local run_diagnostics_only="false"
-    local run_network_diagnostics_only="false"
-    local auto_weekly_mode="false"
-    local cleanup_mode="false"
-    local emergency_cleanup_mode="false"
-    local force_mode="false"
-    local no_reboot="false"
-    local test_telegram_mode="false"
-    
-    # Keine Argumente = Hilfe
-    if [[ $# -eq 0 ]]; then
-        show_enhanced_help
-    fi
-    
-    # Argumente verarbeiten
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -h|--help)
-                show_enhanced_help
-                ;;
-            -d|--docker)
-                install_docker_only="true"
-                shift
-                ;;
-            -l|--log)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    LOG_FILE="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--log benötigt einen Dateinamen"
-                    exit 1
-                fi
-                ;;
-            --debug)
-                enable_enhanced_debug_mode
-                shift
-                ;;
-            --force)
-                force_mode="true"
-                shift
-                ;;
-            --no-reboot)
-                no_reboot="true"
-                shift
-                ;;
-            --auto-weekly)
-                auto_weekly_mode="true"
-                WEEKLY_MODE="true"
-                shift
-                ;;
-            --test-telegram)
-                test_telegram_mode="true"
-                shift
-                ;;
-            --adoption-token)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    ADOPTION_TOKEN="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--adoption-token benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --telegram-token)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    TELEGRAM_TOKEN="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--telegram-token benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --telegram-chat)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    TELEGRAM_CHAT="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--telegram-chat benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --ubuntu-token)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    UBUNTU_PRO_TOKEN="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--ubuntu-token benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --ssh-key)
-                if [[ -n "${2:-}" && "${2}" != --* ]]; then
-                    SSH_KEY="$2"
-                    shift 2
-                else
-                    enhanced_log "ERROR" "--ssh-key benötigt einen Wert"
-                    exit 1
-                fi
-                ;;
-            --cleanup)
-                cleanup_mode="true"
-                shift
-                ;;
-            --emergency-cleanup)
-                emergency_cleanup_mode="true"
-                shift
-                ;;
-            --diagnose)
-                run_diagnostics_only="true"
-                shift
-                ;;
-            --network-diagnose)
-                run_network_diagnostics_only="true"
-                shift
-                ;;
-            -*)
-                enhanced_log "ERROR" "Unbekannte Option: $1"
-                echo "Verwenden Sie --help für Hilfe" >&2
-                exit 1
-                ;;
-            *)
-                enhanced_log "ERROR" "Unerwartetes Argument: $1"
-                echo "Verwenden Sie --help für Hilfe" >&2
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Telegram-Test-Modus
-    if [[ "${test_telegram_mode}" == "true" ]]; then
-        execute_telegram_test_mode
-        exit $?
-    fi
-    
-    # Validiere und führe spezielle Modi aus
-    execute_enhanced_special_modes \
-        "${install_docker_only}" \
-        "${run_diagnostics_only}" \
-        "${run_network_diagnostics_only}" \
-        "${auto_weekly_mode}" \
-        "${cleanup_mode}" \
-        "${emergency_cleanup_mode}" \
-        "${force_mode}" \
-        "${no_reboot}"
-}
-
-# Telegram-Test-Modus
-execute_telegram_test_mode() {
-    echo "=== TELEGRAM-KONFIGURATION TEST ==="
-    echo "Teste Telegram-Token und Chat-ID..."
-    echo "===================================="
-    
-    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
-        echo "FEHLER: --telegram-token und --telegram-chat sind erforderlich"
-        echo "Beispiel: ./install.sh --test-telegram --telegram-token \"123:ABC\" --telegram-chat \"456\""
-        return 1
-    fi
-    
-    # Basis-Systeminformationen sammeln für Test
-    get_enhanced_system_info
-    
-    # Führe Test durch
-    if test_telegram_config; then
-        echo "✅ Telegram-Konfiguration erfolgreich getestet!"
-        echo "Bot kann Nachrichten an Chat ${TELEGRAM_CHAT} senden."
-        return 0
-    else
-        echo "❌ Telegram-Konfiguration fehlgeschlagen!"
-        echo "Prüfe Token und Chat-ID."
-        return 1
-    fi
-}
-
-# Basis-Systeminformationen sammeln
-get_system_info() {
-    enhanced_log "INFO" "Sammle Basis-Systeminformationen"
-    
-    # Diese Funktion wird durch get_enhanced_system_info ersetzt/erweitert
-    # Hier für Kompatibilität
-    get_enhanced_system_info
-    return 0
-}
-
 # Architektur erkennen
 detect_architecture() {
     enhanced_log "INFO" "Erkenne System-Architektur"
@@ -1072,7 +872,7 @@ enhanced_validate_system() {
         disk_available_gb=$((disk_available_mb / 1024))
         
         # Für genauere Darstellung: 1.5GB = 1536MB
-        local min_space_mb=$((MIN_FREE_SPACE_GB * 1024 / 1))  # 1.5 -> 1536
+        local min_space_mb
         min_space_mb=$(echo "${MIN_FREE_SPACE_GB}" | awk '{print int($1 * 1024)}')
         
         log "DEBUG: Verfügbar: ${disk_available_mb}MB, Minimum: ${min_space_mb}MB"
@@ -1080,7 +880,8 @@ enhanced_validate_system() {
         if [[ ${disk_available_mb} -lt ${min_space_mb} ]]; then
             # Bessere Anzeige für Sub-GB Werte
             if [[ ${disk_available_gb} -eq 0 ]]; then
-                local display_gb=$(echo "scale=1; ${disk_available_mb} / 1024" | bc 2>/dev/null || echo "${disk_available_mb}MB")
+                local display_gb
+                display_gb=$(echo "scale=1; ${disk_available_mb} / 1024" | bc 2>/dev/null || echo "${disk_available_mb}MB")
                 errors+=("Zu wenig freier Speicherplatz: ${display_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
             else
                 errors+=("Zu wenig freier Speicherplatz: ${disk_available_gb}GB (Minimum: ${MIN_FREE_SPACE_GB}GB)")
@@ -1115,167 +916,6 @@ $(printf '%s\n' "${errors[@]}")"
     
     log "Systemvalidierung erfolgreich (RAM: ${mem_mb}MB, Frei: ${disk_available_gb}GB)"
     return 0
-}
-
-# KORRIGIERTE Error-Handler (verhindert doppelte Telegram-Nachrichten)
-enhanced_error_handler() {
-    local line_number="$1"
-    local error_code="${2:-1}"
-    local error_msg="Skript fehlgeschlagen in Zeile ${line_number} (Exit-Code: ${error_code})"
-    
-    log "KRITISCHER FEHLER: ${error_msg}"
-    
-    # Prüfe, ob bereits eine Telegram-Nachricht in den letzten 60 Sekunden gesendet wurde
-    local last_telegram_file="/tmp/last_telegram_notification"
-    local current_time=$(date +%s)
-    local send_telegram=true
-    
-    if [[ -f "${last_telegram_file}" ]]; then
-        local last_time
-        last_time=$(cat "${last_telegram_file}" 2>/dev/null || echo "0")
-        local time_diff=$((current_time - last_time))
-        
-        if [[ ${time_diff} -lt 60 ]]; then
-            log "Telegram-Nachricht vor ${time_diff}s gesendet - überspringe doppelte Benachrichtigung"
-            send_telegram=false
-        fi
-    fi
-    
-    if [[ "${send_telegram}" == "true" ]]; then
-        # Sammle Debug-Informationen
-        local debug_info=""
-        debug_info+="Letzte Befehle: $(history | tail -3 | tr '\n' '; ')
-"
-        debug_info+="Speicher: $(free -h | grep Mem | awk '{print $3"/"$2}')
-"
-        debug_info+="Festplatte: $(df -h / | awk 'NR==2 {print $3"/"$2" ("$5")"}')
-"
-        
-        enhanced_notify "error" "Fehlermeldung" "${error_msg}
-
-Debug-Info:
-${debug_info}"
-        
-        # Markiere, dass Telegram-Nachricht gesendet wurde
-        echo "${current_time}" > "${last_telegram_file}"
-    fi
-    
-    # Cleanup
-    cleanup_on_error
-    exit "${error_code}"
-}
-
-# KORRIGIERTE enhanced_notify (bessere Link-Behandlung)
-enhanced_notify() {
-    local level="$1"
-    local title="$2"
-    local message="$3"
-    
-    # Nur Fehler und erste Installation senden
-    if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then
-        return 0
-    fi
-    
-    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
-        log "Telegram-Konfiguration nicht vollständig"
-        return 0
-    fi
-    
-    # Sammle aktuelle Systeminfo falls nicht vorhanden
-    [[ -z "${COUNTRY}" ]] && get_enhanced_system_info
-    
-    local icon emoji
-    case "${level}" in
-        "error")
-            icon="❌"
-            emoji="KRITISCHER FEHLER"
-            ;;
-        "install_success")
-            icon="✅"
-            emoji="INSTALLATION ERFOLGREICH"
-            ;;
-    esac
-    
-    # Erstelle erweiterte Nachricht basierend auf Level
-    local extended_message
-    if [[ "${level}" == "install_success" ]]; then
-        # [Success-Message Code bleibt gleich wie vorher]
-        # ... (Code für install_success)
-        
-    elif [[ "${level}" == "error" ]]; then
-        # KORRIGIERTE Fehler-Nachricht
-        local system_status error_context
-        
-        # VERBESSERTE System-Status-Sammlung
-        local ram_status disk_status load_status
-        ram_status=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unbekannt")
-        disk_status=$(df -h / 2>/dev/null | awk 'NR==2 {print $4" frei"}' || echo "unbekannt")
-        load_status=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "unbekannt")
-        
-        system_status="RAM: ${ram_status} | HDD: ${disk_status} | Load: ${load_status}"
-        
-        # Letzte relevante Log-Einträge
-        error_context=$(tail -10 "${LOG_FILE}" 2>/dev/null | grep -E "(ERROR|CRITICAL|Failed)" | tail -2 | sed 's/^.*] //' || echo "Keine Details verfügbar")
-        
-        # KORRIGIERTE Fehler-Nachricht (ohne problematische Markdown)
-        extended_message="${icon} ${emoji}
-
-🌍 SERVER: ${COUNTRY} | ${PUBLIC_IP}
-🏠 Host: ${HOSTNAME_NEW}
-🏢 ${PROVIDER} (${ASN})
-
-🚨 FEHLER-DETAILS:
-${title}: ${message}
-
-💻 SYSTEM: ${system_status}
-
-📋 KONTEXT:
-${error_context}
-
-🔧 Zugang: ssh root@${PUBLIC_IP}
-📊 Logs: tail -50 /var/log/globalping-install.log"
-    fi
-    
-    log "Sende erweiterte Telegram-Nachricht (${#extended_message} Zeichen)..."
-    
-    # Telegram-Limit beachten
-    if [[ ${#extended_message} -gt 4000 ]]; then
-        extended_message=$(echo "${extended_message}" | head -c 3900)
-        extended_message="${extended_message}
-
-...gekürzt - Details via SSH"
-    fi
-    
-    # KORRIGIERT: Sende OHNE Markdown bei Fehlern (verhindert API-Probleme)
-    local result
-    if [[ "${level}" == "install_success" ]]; then
-        # Success-Nachrichten mit Markdown-Links
-        result=$(curl -s -X POST \
-            --connect-timeout 10 \
-            --max-time 15 \
-            -d "chat_id=${TELEGRAM_CHAT}" \
-            -d "text=${extended_message}" \
-            -d "parse_mode=Markdown" \
-            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
-    else
-        # Fehler-Nachrichten OHNE Markdown (sicherer)
-        result=$(curl -s -X POST \
-            --connect-timeout 10 \
-            --max-time 15 \
-            -d "chat_id=${TELEGRAM_CHAT}" \
-            -d "text=${extended_message}" \
-            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" 2>&1)
-    fi
-    
-    if echo "${result}" | grep -q '"ok":true'; then
-        local message_id
-        message_id=$(echo "${result}" | grep -o '"message_id":[0-9]*' | cut -d':' -f2 || echo "unbekannt")
-        log "Telegram-Nachricht erfolgreich gesendet (ID: ${message_id})"
-        return 0
-    else
-        log "Telegram-API Fehler: ${result}"
-        return 1
-    fi
 }
 
 # Intelligente Swap-Konfiguration
@@ -2479,6 +2119,7 @@ WARTUNGS-OPTIONEN:
     --emergency-cleanup             Aggressive Notfall-Bereinigung  
     --diagnose                      Vollständige Systemdiagnose
     --network-diagnose              Detaillierte Netzwerk-Diagnose
+    --test-telegram                 Teste Telegram-Konfiguration
 
 ERWEITERTE OPTIONEN:
     -d, --docker                    Installiert nur Docker
@@ -2487,10 +2128,16 @@ ERWEITERTE OPTIONEN:
     --force                         Überspringt Sicherheitsabfragen
     --no-reboot                     Verhindert automatische Reboots
 
+TELEGRAM-KONFIGURATION:
+    1. Erstelle einen Bot: @BotFather
+    2. Erhalte Token und Chat-ID
+    3. Teste mit: ./install.sh --test-telegram --telegram-token "TOKEN" --telegram-chat "CHAT_ID"
+
 NEUE FEATURES:
+    ✓ Verbesserte Telegram-Benachrichtigungen mit Debugging
+    ✓ Erweiterte Abhängigkeiten (unzip, tar, gzip, etc.)
     ✓ Intelligente Swap-Konfiguration (RAM + Swap ≥ 1GB)
     ✓ Automatische Reboots bei kritischen Updates
-    ✓ Erweiterte Telegram-Benachrichtigungen (nur Fehler)
     ✓ Absolute Speicherplatz-Schwellwerte (1.5GB minimum)
     ✓ CPU-Hang-Schutz durch Timeouts
     ✓ restart=always für Globalping-Container
@@ -2504,33 +2151,14 @@ SYSTEMANFORDERUNGEN:
     - Root-Rechte oder sudo-Zugang
     - Internetverbindung
 
-AUTOMATISIERUNG:
-    Nach der Installation läuft wöchentlich automatisch:
-    ✓ Skript-Updates
-    ✓ System-Updates mit Reboot-Check
-    ✓ Globalping-Container-Wartung
-    ✓ Systemreinigung
-    ✓ Swap-Optimierung
-    ✓ Log-Rotation
-
-TELEGRAM-BENACHRICHTIGUNGEN:
-    Das Skript sendet formatierte Nachrichten bei:
-    ✓ Erfolgreicher Erstinstallation
-    ✓ Kritischen Fehlern (keine Warnungen)
-    
-    Format:
-    🌍 Country: DE
-    🖥️ Hostname: hostname
-    🌐 IP: 1.2.3.4
-    📡 ASN: AS12345
-    🏢 Provider: Provider Name
-    🔧 Status/Fehlermeldung
-
 BEISPIELE:
     # Vollständige Installation
     ./install.sh --adoption-token "token" \
                   --telegram-token "bot-token" \
                   --telegram-chat "chat-id"
+
+    # Teste Telegram-Konfiguration
+    ./install.sh --test-telegram --telegram-token "123:ABC" --telegram-chat "456"
 
     # Nur Diagnose
     ./install.sh --diagnose
@@ -2538,20 +2166,11 @@ BEISPIELE:
     # Systemreinigung
     ./install.sh --cleanup
 
-    # Debug-Modus
-    ./install.sh --debug --adoption-token "token"
-
-DATEIEN:
-    - Setup-Log: /var/log/globalping-install.log
-    - Globalping-Verzeichnis: /opt/globalping
-    - Auto-Update-Skript: /usr/local/bin/install_globalping.sh
-    - Systemd-Timer: /etc/systemd/system/globalping-update.timer
-
 HELP_EOF
     exit 0
 }
 
-# Erweiterte Argumentverarbeitung
+# Erweiterte Argumentverarbeitung mit Telegram-Test
 process_enhanced_args() {
     # Standardwerte
     local install_docker_only="false"
@@ -2562,6 +2181,7 @@ process_enhanced_args() {
     local emergency_cleanup_mode="false"
     local force_mode="false"
     local no_reboot="false"
+    local test_telegram_mode="false"
     
     # Keine Argumente = Hilfe
     if [[ $# -eq 0 ]]; then
@@ -2602,6 +2222,10 @@ process_enhanced_args() {
             --auto-weekly)
                 auto_weekly_mode="true"
                 WEEKLY_MODE="true"
+                shift
+                ;;
+            --test-telegram)
+                test_telegram_mode="true"
                 shift
                 ;;
             --adoption-token)
@@ -2678,6 +2302,12 @@ process_enhanced_args() {
         esac
     done
     
+    # Telegram-Test-Modus
+    if [[ "${test_telegram_mode}" == "true" ]]; then
+        execute_telegram_test_mode
+        exit $?
+    fi
+    
     # Validiere und führe spezielle Modi aus
     execute_enhanced_special_modes \
         "${install_docker_only}" \
@@ -2688,6 +2318,43 @@ process_enhanced_args() {
         "${emergency_cleanup_mode}" \
         "${force_mode}" \
         "${no_reboot}"
+}
+
+# Telegram-Test-Modus
+execute_telegram_test_mode() {
+    echo "=== TELEGRAM-KONFIGURATION TEST ==="
+    echo "Teste Telegram-Token und Chat-ID..."
+    echo "===================================="
+    
+    if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then
+        echo "FEHLER: --telegram-token und --telegram-chat sind erforderlich"
+        echo "Beispiel: ./install.sh --test-telegram --telegram-token \"123:ABC\" --telegram-chat \"456\""
+        return 1
+    fi
+    
+    # Basis-Systeminformationen sammeln für Test
+    get_enhanced_system_info
+    
+    # Führe Test durch
+    if test_telegram_config; then
+        echo "✅ Telegram-Konfiguration erfolgreich getestet!"
+        echo "Bot kann Nachrichten an Chat ${TELEGRAM_CHAT} senden."
+        return 0
+    else
+        echo "❌ Telegram-Konfiguration fehlgeschlagen!"
+        echo "Prüfe Token und Chat-ID."
+        return 1
+    fi
+}
+
+# Basis-Systeminformationen sammeln
+get_system_info() {
+    enhanced_log "INFO" "Sammle Basis-Systeminformationen"
+    
+    # Diese Funktion wird durch get_enhanced_system_info ersetzt/erweitert
+    # Hier für Kompatibilität
+    get_enhanced_system_info
+    return 0
 }
 
 # Führe erweiterte spezielle Modi aus
@@ -4203,10 +3870,3 @@ fi
 # ===========================================
 # END OF ENHANCED SCRIPT
 # ===========================================
-
-# Erweiterte Version-Info
-# Version: 2025.06.07-enhanced
-# Features: Erweiterte Automatisierung, intelligente Swap-Konfiguration,
-#           robuste Fehlerbehandlung, erweiterte Telegram-Benachrichtigungen,
-#           CPU-Hang-Schutz, automatische Reboots, absolute Speicherplatz-Schwellwerte
-# Kompatibilität: Ubuntu 18.04+, Debian 9+, RHEL/CentOS 7+, Rocky/Alma 8+, Fedora 30+
