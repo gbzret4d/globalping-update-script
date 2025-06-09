@@ -831,7 +831,7 @@ update_system() {
         apt-get update >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
         }
-        apt-get upgrade -y --fix-broken >/dev/null 2>&1 || {
+        apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get upgrade fehlgeschlagen"
         }
         
