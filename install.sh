@@ -831,7 +831,7 @@ update_system() {
         apt-get update >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get update fehlgeschlagen"
         }
-        apt-get upgrade -y >/dev/null 2>&1 || {
+        apt-get upgrade -y --fix-broken >/dev/null 2>&1 || {
             enhanced_log "WARN" "apt-get upgrade fehlgeschlagen"
         }
         
@@ -840,7 +840,7 @@ update_system() {
         
     elif [[ "${is_rhel_based}" == "true" ]]; then
         if command -v dnf >/dev/null 2>&1; then
-            dnf update -y >/dev/null 2>&1 || {
+            dnf update -y --skip-broken >/dev/null 2>&1 || {
                 enhanced_log "WARN" "dnf update fehlgeschlagen"
             }
             # DNF Bereinigung
@@ -848,7 +848,7 @@ update_system() {
             dnf autoremove -y >/dev/null 2>&1 || true
             
         elif command -v yum >/dev/null 2>&1; then
-            yum update -y >/dev/null 2>&1 || {
+            yum update -y --skip-broken >/dev/null 2>&1 || {
                 enhanced_log "WARN" "yum update fehlgeschlagen"
             }
             # YUM Bereinigung
@@ -1160,7 +1160,7 @@ check_critical_updates() {
             if [[ ${phased_count} -gt 0 ]] 2>/dev/null; then
                 log "Phased Updates erkannt (${phased_count}) - überspringe Reboot"
                 # Führe Updates trotzdem durch, aber ohne Reboot
-                if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
+                if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
                     log "Phased Updates installiert ohne Reboot"
                 fi
                 perform_package_cleanup
@@ -1182,7 +1182,7 @@ check_critical_updates() {
         # Führe Updates durch
         if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]] 2>/dev/null; then
             log "Installiere kritische Updates..."
-            if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y >/dev/null 2>&1; then
+            if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
                 log "Updates erfolgreich installiert"
             else
                 enhanced_log "ERROR" "Update-Installation fehlgeschlagen"
@@ -1205,13 +1205,13 @@ check_critical_updates() {
         # KORRIGIERTE Bedingung
         if [[ ${kernel_updates} -gt 0 ]] 2>/dev/null; then
             log "Kernel-Updates gefunden, installiere..."
-            if timeout "${TIMEOUT_PACKAGE}" dnf update -y kernel* >/dev/null 2>&1; then
+            if timeout "${TIMEOUT_PACKAGE}" dnf update -y --skip-broken kernel* >/dev/null 2>&1; then
                 needs_reboot=true
             fi
         fi
         
         # Kritische Updates
-        if timeout "${TIMEOUT_PACKAGE}" dnf update -y systemd glibc openssh* >/dev/null 2>&1; then
+        if timeout "${TIMEOUT_PACKAGE}" dnf update -y --skip-broken systemd glibc openssh* >/dev/null 2>&1; then
             log "Kritische Updates installiert"
             needs_reboot=true
         fi
@@ -2322,7 +2322,7 @@ install_docker_debian_ubuntu() {
         enhanced_log "WARN" "apt-get update fehlgeschlagen"
     }
     
-    apt-get install -y \
+    apt-get install -y --fix-broken --fix-missing \
         apt-transport-https \
         ca-certificates \
         curl \
@@ -2401,7 +2401,7 @@ install_docker_rhel_family() {
             return 1
         }
         
-        dnf install -y docker-ce docker-ce-cli containerd.io \
+        dnf install -y --skip-broken docker-ce docker-ce-cli containerd.io \
                       docker-buildx-plugin docker-compose-plugin >/dev/null 2>&1 || {
             enhanced_log "ERROR" "Docker-Installation fehlgeschlagen"
             return 1
