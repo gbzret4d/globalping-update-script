@@ -1168,29 +1168,57 @@ check_critical_updates() {
             fi
         fi
         
-        # KORRIGIERTE Bedingungen mit sicherer Zahlenprüfung
-        if [[ ${kernel_updates} -gt 0 ]] 2>/dev/null; then
-            log "ECHTE Kernel-Updates gefunden: ${kernel_updates}"
-            needs_reboot=true
-        fi
+        # Führe Updates durch BEVOR Reboot-Entscheidung
+if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]] 2>/dev/null; then
+    log "Installiere kritische Updates..."
+    if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
+        log "Updates erfolgreich installiert"
         
-        if [[ ${critical_updates} -gt 0 ]] 2>/dev/null; then
-            log "ECHTE kritische System-Updates gefunden: ${critical_updates}"
-            needs_reboot=true
-        fi
+        # PRÜFE ob Kernel-Updates tatsächlich installiert wurden
+        local remaining_kernel_updates remaining_critical_updates
+        local remaining_updates
+        remaining_updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" | grep -v "Listing" || echo "")
         
-        # Führe Updates durch
-        if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]] 2>/dev/null; then
-            log "Installiere kritische Updates..."
-            if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
-                log "Updates erfolgreich installiert"
-            else
-                enhanced_log "ERROR" "Update-Installation fehlgeschlagen"
-                return 1
+        if [[ -n "${remaining_updates}" ]]; then
+            remaining_kernel_updates=$(echo "${remaining_updates}" | grep -c "linux-image\|linux-generic\|linux-headers" 2>/dev/null || echo "0")
+            remaining_critical_updates=$(echo "${remaining_updates}" | grep -c "systemd\|libc6\|glibc" 2>/dev/null || echo "0")
+            
+            # Bereinige Output
+            remaining_kernel_updates=$(echo "${remaining_kernel_updates}" | tr -d '\n\r' | head -c 10)
+            remaining_critical_updates=$(echo "${remaining_critical_updates}" | tr -d '\n\r' | head -c 10)
+            if ! [[ "${remaining_kernel_updates}" =~ ^[0-9]+$ ]]; then
+                remaining_kernel_updates=0
             fi
-            # Bereinigung nach Updates
-            perform_package_cleanup
+            if ! [[ "${remaining_critical_updates}" =~ ^[0-9]+$ ]]; then
+                remaining_critical_updates=0
+            fi
+        else
+            remaining_kernel_updates=0
+            remaining_critical_updates=0
         fi
+        
+        # Reboot nur wenn Updates tatsächlich installiert wurden
+        if [[ ${kernel_updates} -gt 0 && ${remaining_kernel_updates} -lt ${kernel_updates} ]] 2>/dev/null; then
+            log "Kernel-Updates erfolgreich installiert (${kernel_updates} -> ${remaining_kernel_updates})"
+            needs_reboot=true
+        fi
+        
+        if [[ ${critical_updates} -gt 0 && ${remaining_critical_updates} -lt ${critical_updates} ]] 2>/dev/null; then
+            log "Kritische Updates erfolgreich installiert (${critical_updates} -> ${remaining_critical_updates})"
+            needs_reboot=true
+        fi
+        
+        if [[ ${remaining_kernel_updates} -eq ${kernel_updates} && ${kernel_updates} -gt 0 ]] 2>/dev/null; then
+            log "WARNUNG: Kernel-Updates konnten nicht installiert werden (${kernel_updates} verbleibend)"
+        fi
+        
+    else
+        enhanced_log "ERROR" "Update-Installation fehlgeschlagen"
+        return 1
+    fi
+    # Bereinigung nach Updates
+    perform_package_cleanup
+fi
         
     # Für RHEL/CentOS/Fedora - KORRIGIERT
     elif command -v dnf >/dev/null 2>&1; then
