@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.14-v2.0.1"
+readonly SCRIPT_VERSION="2025.06.22-v2.0.2"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -1168,10 +1168,26 @@ check_critical_updates() {
             fi
         fi
         
-        # Führe Updates durch BEVOR Reboot-Entscheidung
+# Führe Updates durch BEVOR Reboot-Entscheidung
 if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]] 2>/dev/null; then
     log "Installiere kritische Updates..."
-    if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
+    
+    # Für Kernel-Updates verwende dist-upgrade
+    if [[ ${kernel_updates} -gt 0 ]] 2>/dev/null; then
+        log "Installiere Kernel-Updates mit dist-upgrade..."
+        if timeout "${TIMEOUT_PACKAGE}" apt-get dist-upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
+            log "Kernel-Updates mit dist-upgrade installiert"
+        else
+            enhanced_log "WARN" "dist-upgrade fehlgeschlagen, versuche normale Upgrade"
+            timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1
+        fi
+    else
+        # Für andere Updates normales upgrade
+        timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1
+    fi
+    
+    if [[ $? -eq 0 ]]; then
+        log "Updates erfolgreich installiert"
         log "Updates erfolgreich installiert"
         
         # PRÜFE ob Kernel-Updates tatsächlich installiert wurden
@@ -1472,7 +1488,7 @@ services:
       - ADOPTION_TOKEN=${ADOPTION_TOKEN}
       - NODE_ENV=production
     volumes:
-      - probe-data:/home/node/.globalping
+      - globalping-probe-data:/home/node/.globalping
       - /etc/localtime:/etc/localtime:ro
     network_mode: host
     logging:
