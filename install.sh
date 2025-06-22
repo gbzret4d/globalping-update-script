@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.22-v2.0.2"
+readonly SCRIPT_VERSION="2025.06.22-v2.0.3"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -1488,7 +1488,7 @@ services:
       - ADOPTION_TOKEN=${ADOPTION_TOKEN}
       - NODE_ENV=production
     volumes:
-      - globalping-probe-data:/home/node/.globalping
+      - probe-data:/home/node/.globalping
       - /etc/localtime:/etc/localtime:ro
     network_mode: host
     logging:
