@@ -14,7 +14,7 @@ readonly CRON_JOB="0 2 * * 0 /usr/local/bin/globalping-maintenance"
 readonly AUTO_UPDATE_CRON="0 3 * * 0 /usr/local/bin/install_globalping.sh --auto-weekly"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
-readonly SCRIPT_VERSION="2025.06.22-v2.0.3"
+readonly SCRIPT_VERSION="2025.06.22-v2.1.0"
 
 # Erweiterte Konfiguration
 readonly MIN_FREE_SPACE_GB="1.5"  # Mindestens 1.5GB frei
@@ -1481,11 +1481,11 @@ version: '3.8'
 
 services:
   globalping-probe:
-    image: ghcr.io/jsdelivr/globalping-probe:latest
+    image: globalping/globalping-probe
     container_name: globalping-probe
     restart: always
     environment:
-      - ADOPTION_TOKEN=${ADOPTION_TOKEN}
+      - GP_ADOPTION_TOKEN=${ADOPTION_TOKEN}
       - NODE_ENV=production
     volumes:
       - probe-data:/home/node/.globalping
@@ -1571,11 +1571,11 @@ start_enhanced_globalping_probe() {
             --tmpfs /tmp \
             --ulimit nproc=65535 \
             --ulimit nofile=65535:65535 \
-            -e "ADOPTION_TOKEN=${ADOPTION_TOKEN}" \
+            -e "GP_ADOPTION_TOKEN=${ADOPTION_TOKEN}" \
             -e "NODE_ENV=production" \
             -v globalping-probe-data:/home/node/.globalping \
             -v /etc/localtime:/etc/localtime:ro \
-            ghcr.io/jsdelivr/globalping-probe:latest; then
+            globalping/globalping-probe; then
             enhanced_log "ERROR" "Container-Start mit docker run fehlgeschlagen"
             return 1
         fi
