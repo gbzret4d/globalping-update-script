@@ -1160,7 +1160,11 @@ check_critical_updates() {
             if [[ ${phased_count} -gt 0 ]] 2>/dev/null; then
                 log "Phased Updates erkannt (${phased_count}) - überspringe Reboot"
                 # Führe Updates trotzdem durch, aber ohne Reboot
-                if timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
+                if DEBIAN_FRONTEND=noninteractive timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    -o APT::Get::Assume-Yes=true \
+    --fix-broken --fix-missing >/dev/null 2>&1; then
                     log "Phased Updates installiert ohne Reboot"
                 fi
                 perform_package_cleanup
@@ -1175,15 +1179,27 @@ if [[ ${kernel_updates} -gt 0 || ${critical_updates} -gt 0 ]] 2>/dev/null; then
     # Für Kernel-Updates verwende dist-upgrade
     if [[ ${kernel_updates} -gt 0 ]] 2>/dev/null; then
         log "Installiere Kernel-Updates mit dist-upgrade..."
-        if timeout "${TIMEOUT_PACKAGE}" apt-get dist-upgrade -y --fix-broken --fix-missing >/dev/null 2>&1; then
+        if DEBIAN_FRONTEND=noninteractive timeout "${TIMEOUT_PACKAGE}" apt-get dist-upgrade -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    -o APT::Get::Assume-Yes=true \
+    --fix-broken --fix-missing >/dev/null 2>&1; then
             log "Kernel-Updates mit dist-upgrade installiert"
         else
             enhanced_log "WARN" "dist-upgrade fehlgeschlagen, versuche normale Upgrade"
-            timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    -o APT::Get::Assume-Yes=true \
+    --fix-broken --fix-missing >/dev/null 2>&1
         fi
     else
         # Für andere Updates normales upgrade
-        timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y --fix-broken --fix-missing >/dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive timeout "${TIMEOUT_PACKAGE}" apt-get upgrade -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    -o APT::Get::Assume-Yes=true \
+    --fix-broken --fix-missing >/dev/null 2>&1
     fi
     
     if [[ $? -eq 0 ]]; then
