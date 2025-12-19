@@ -5,7 +5,7 @@ set -euo pipefail
 # GLOBAL VARIABLES & COMPATIBILITY LAYER
 # =============================================
 # WARNING: Do NOT remove or reorder these empty variables.
-# Older versions (v1.x - v2.3) use 'sed' to inject values here during auto-update.
+# Older versions use 'sed' to inject values here during auto-update.
 UBUNTU_PRO_TOKEN=""
 TELEGRAM_TOKEN=""
 TELEGRAM_CHAT=""
@@ -15,7 +15,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONSTANTS & CONFIGURATION
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v2.5"
+readonly SCRIPT_VERSION="2025.12.21-v2.6"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly TMP_DIR="/tmp/globalping_install"
@@ -33,6 +33,11 @@ GP_MEM_LIMIT=""       # Empty = Docker default
 readonly MIN_FREE_SPACE_GB="1.5"
 readonly MIN_RAM_MB="256"
 readonly MAX_LOG_SIZE_MB="50"
+
+# Timeouts (Seconds)
+readonly TIMEOUT_NETWORK="10"
+readonly TIMEOUT_PACKAGE="1800"
+readonly TIMEOUT_DOCKER="900"
 
 # Runtime State
 DEBUG_MODE="false"
@@ -63,7 +68,6 @@ load_and_migrate_config() {
     # 2. MIGRATION: Check if variables were injected by old update script
     local save_needed=false
 
-    # Helper to migrate a single variable
     migrate_var() {
         local var_name="$1"
         local var_value="$2"
@@ -131,7 +135,6 @@ enhanced_log() {
 
 log() { enhanced_log "INFO" "$1"; }
 
-# NEW: Generic Retry Function
 retry_command() {
     local retries=3
     local count=0
@@ -169,19 +172,11 @@ wait_for_apt_locks() {
     done
 }
 
-# NEW: Check OS Compatibility
-check_compatibility() {
+check_root() {
     if [[ "${EUID}" -ne 0 ]]; then
         enhanced_log "ERROR" "This script requires root privileges."
         return 1
     fi
-
-    # Check for Systemd (Critical for Timer)
-    if ! pidof systemd >/dev/null 2>&1 && [[ ! -d /run/systemd/system ]]; then
-        enhanced_log "ERROR" "Systemd not detected. This script requires a systemd-based OS."
-        return 1
-    fi
-
     return 0
 }
 
@@ -206,7 +201,7 @@ enable_tcp_bbr() {
     if sysctl -p >/dev/null 2>&1; then
         log "TCP BBR successfully enabled."
     else
-        enhanced_log "WARN" "Could not apply sysctl settings (maybe container restriction?)."
+        enhanced_log "WARN" "Could not apply sysctl settings."
     fi
 }
 
@@ -240,10 +235,11 @@ EOF
 }
 
 # =============================================
-# CORE SYSTEM FUNCTIONS
+# CORE SYSTEM FUNCTIONS (Restored Verbosity)
 # =============================================
 
 get_enhanced_system_info() {
+    log "Collecting system information..."
     PUBLIC_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "unknown")
     local ipinfo
     ipinfo=$(curl -s --connect-timeout 5 "https://ipinfo.io/json" 2>/dev/null || echo "")
@@ -267,6 +263,7 @@ get_enhanced_system_info() {
     else
         HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-node")
     fi
+    log "Detected: IP=${PUBLIC_IP}, Host=${HOSTNAME_NEW}, ISP=${PROVIDER}"
 }
 
 enhanced_notify() {
@@ -328,11 +325,92 @@ ${message}
 # INSTALLATION & MAINTENANCE LOGIC
 # =============================================
 
+install_dependencies() {
+    log "Installing system dependencies..."
+    
+    local missing_cmds=()
+    for cmd in curl wget unzip tar gzip bc; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_cmds+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing_cmds[@]} -eq 0 ]]; then
+        log "All dependencies are already installed."
+        return 0
+    fi
+    
+    log "Installing missing: ${missing_cmds[*]}"
+    if command -v apt-get >/dev/null 2>&1; then 
+        wait_for_apt_locks
+        retry_command apt-get update >/dev/null 2>&1
+        retry_command apt-get install -y curl wget unzip docker.io bc tar gzip >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        retry_command dnf install -y curl wget unzip docker bc tar gzip >/dev/null 2>&1 || true
+    fi
+}
+
+update_system_packages() {
+    log "Updating system packages..."
+    if command -v apt-get >/dev/null 2>&1; then
+        wait_for_apt_locks
+        # Check for phased updates to avoid unnecessary reboots
+        if apt list --upgradable 2>/dev/null | grep -q "phased"; then
+             log "Phased updates detected. Skipping full upgrade to avoid reboot loops."
+             retry_command apt-get upgrade -y >/dev/null 2>&1 || true
+        else
+             retry_command apt-get upgrade -y >/dev/null 2>&1 || true
+        fi
+        retry_command apt-get autoremove -y >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        retry_command dnf update -y --refresh >/dev/null 2>&1 || true
+        retry_command dnf autoremove -y >/dev/null 2>&1 || true
+    fi
+    log "System update completed."
+}
+
+configure_hostname() {
+    log "Configuring hostname..."
+    if [[ -n "${HOSTNAME_NEW}" && "${HOSTNAME_NEW}" != "unknown" ]]; then
+        local current
+        current=$(hostname)
+        if [[ "$current" != "$HOSTNAME_NEW" ]]; then
+            log "Changing hostname: $current -> $HOSTNAME_NEW"
+            hostname "$HOSTNAME_NEW"
+            echo "$HOSTNAME_NEW" > /etc/hostname
+            sed -i "s/^127.0.1.1.*/127.0.1.1\t${HOSTNAME_NEW}/" /etc/hosts 2>/dev/null || true
+        else
+            log "Hostname is already correct."
+        fi
+    fi
+}
+
+setup_ssh_key() {
+    log "Configuring SSH Access..."
+    if [[ -n "${SSH_KEY}" ]]; then
+        if [[ ! -d "${SSH_DIR}" ]]; then
+            mkdir -p "${SSH_DIR}"
+            chmod 700 "${SSH_DIR}"
+        fi
+        
+        if ! grep -Fq "${SSH_KEY}" "${SSH_DIR}/authorized_keys" 2>/dev/null; then
+            echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
+            chmod 600 "${SSH_DIR}/authorized_keys"
+            log "SSH Key added successfully."
+        else
+            log "SSH Key already exists."
+        fi
+    else
+        log "No SSH Key provided."
+    fi
+}
+
 install_docker() {
     enhanced_log "INFO" "Checking Docker installation..."
     
     if command -v docker >/dev/null 2>&1; then
         if systemctl is-active docker >/dev/null 2>&1; then
+            log "Docker is already installed and active."
             return 0
         fi
     fi
@@ -359,7 +437,10 @@ configure_smart_swap() {
     local swap_total
     swap_total=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
     
-    if [[ "${swap_total}" -gt 0 ]]; then return 0; fi
+    if [[ "${swap_total}" -gt 0 ]]; then
+        log "Swap is already configured."
+        return 0
+    fi
     
     local swap_file="/swapfile"
     local mem_total
@@ -385,7 +466,7 @@ configure_smart_swap() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v2.5)..."
+    log "Installing Globalping Probe (v2.6)..."
     
     if [[ -z "${ADOPTION_TOKEN}" ]]; then
         enhanced_log "ERROR" "Adoption Token is missing."
@@ -404,6 +485,7 @@ install_enhanced_globalping_probe() {
 
     # 2. Cleanup Old
     if docker ps -a | grep -q globalping-probe; then
+        log "Removing old container..."
         docker stop globalping-probe >/dev/null 2>&1 || true
         docker rm globalping-probe >/dev/null 2>&1 || true
     fi
@@ -413,10 +495,11 @@ install_enhanced_globalping_probe() {
     [[ -n "${GP_CPU_LIMIT}" ]] && limit_args+=" --cpus=${GP_CPU_LIMIT}"
     [[ -n "${GP_MEM_LIMIT}" ]] && limit_args+=" --memory=${GP_MEM_LIMIT}"
     
-    # 4. Run
+    # 4. Run (With Error Capture!)
     log "Starting container (Limits: CPU=${GP_CPU_LIMIT:-Default}, MEM=${GP_MEM_LIMIT:-Default})..."
     
-    if ! docker run -d \
+    local run_output
+    if ! run_output=$(docker run -d \
         --name globalping-probe \
         --restart always \
         --network host \
@@ -425,9 +508,10 @@ install_enhanced_globalping_probe() {
         -e "GP_ADOPTION_TOKEN=${ADOPTION_TOKEN}" \
         -e "NODE_ENV=production" \
         -v globalping-data:/home/node/.globalping \
-        ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
-            enhanced_log "ERROR" "Failed to start Globalping container."
-            enhanced_notify "error" "Installation Failed" "Could not start Docker container."
+        ghcr.io/jsdelivr/globalping-probe:latest 2>&1); then
+            enhanced_log "ERROR" "Failed to start Globalping container. Docker Error:"
+            enhanced_log "ERROR" "$run_output"
+            enhanced_notify "error" "Installation Failed" "Docker Error: $run_output"
             return 1
     fi
     
@@ -483,7 +567,7 @@ perform_enhanced_auto_update() {
 # =============================================
 
 run_enhanced_diagnostics() {
-    echo "=== SYSTEM DIAGNOSTICS (v2.5) ==="
+    echo "=== SYSTEM DIAGNOSTICS (v2.6) ==="
     echo "Time: $(date)"
     echo "Host: ${HOSTNAME_NEW} (${PUBLIC_IP})"
     
@@ -616,26 +700,26 @@ process_enhanced_args() {
     if [[ "$auto_weekly" == "true" ]]; then
         perform_enhanced_auto_update
         enable_tcp_bbr
-        # System cleanup logic simplified for weekly
         if command -v docker >/dev/null 2>&1; then docker system prune -f >/dev/null 2>&1; fi
         if command -v apt-get >/dev/null 2>&1; then wait_for_apt_locks; apt-get autoclean -y >/dev/null 2>&1; fi
         install_enhanced_globalping_probe
         exit 0
     fi
 
-    # Default Install
-    check_compatibility
+    # Default Install - Full Verbosity Restored
+    check_root
     get_enhanced_system_info
     
-    # Basic Deps
-    if command -v apt-get >/dev/null 2>&1; then 
-        wait_for_apt_locks; retry_command apt-get update >/dev/null 2>&1; retry_command apt-get install -y curl wget unzip docker.io >/dev/null 2>&1 || true
-    fi
-    
+    install_dependencies
+    update_system_packages
+    configure_hostname
+    setup_ssh_key
     configure_smart_swap
     enable_tcp_bbr
-    if [[ "$fail2ban" == "true" ]]; then install_fail2ban; fi
-    if [[ -n "$SSH_KEY" ]]; then mkdir -p "$SSH_DIR"; echo "$SSH_KEY" >> "$SSH_DIR/authorized_keys"; fi
+    
+    if [[ "$fail2ban" == "true" ]]; then
+        install_fail2ban
+    fi
 
     install_enhanced_globalping_probe
     
@@ -662,7 +746,7 @@ WantedBy=timers.target
 EOF
     systemctl daemon-reload; systemctl enable globalping-update.timer; systemctl start globalping-update.timer
 
-    enhanced_notify "install_success" "Installation Complete" "Setup finished successfully (v2.5)."
+    enhanced_notify "install_success" "Installation Complete" "Setup finished successfully (v2.6)."
     echo "✅ Installation successfully completed."
 }
 
