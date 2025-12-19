@@ -1,2 +1,13 @@
-# Auto detect text files and perform LF normalization
+# Automatische Erkennung
 * text=auto
+
+# Erzwinge LF (Linux-Style) für Skripte, egal was Windows macht
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Auch für Configs und Markdown empfohlen
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitattributes text eol=lf
+LICENSE text eol=lf
