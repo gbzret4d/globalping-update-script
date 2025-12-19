@@ -15,7 +15,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONSTANTS & CONFIGURATION
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v2.6"
+readonly SCRIPT_VERSION="2025.12.21-v2.7"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly TMP_DIR="/tmp/globalping_install"
@@ -44,6 +44,7 @@ DEBUG_MODE="false"
 WEEKLY_MODE="false"
 REBOOT_REQUIRED="false"
 TELEGRAM_SENT="false"
+FORCE_RECREATE="false"
 
 # System Info Placeholders
 COUNTRY=""
@@ -59,13 +60,11 @@ PROVIDER=""
 load_and_migrate_config() {
     mkdir -p "$(dirname "${CONFIG_FILE}")"
 
-    # 1. Load existing config
     if [[ -f "${CONFIG_FILE}" ]]; then
         # shellcheck source=/dev/null
         source "${CONFIG_FILE}"
     fi
 
-    # 2. MIGRATION: Check if variables were injected by old update script
     local save_needed=false
 
     migrate_var() {
@@ -83,14 +82,12 @@ load_and_migrate_config() {
     migrate_var "SSH_KEY" "${SSH_KEY}"
     migrate_var "UBUNTU_PRO_TOKEN" "${UBUNTU_PRO_TOKEN}"
 
-    # 3. Save Defaults if missing
     if ! grep -q "GP_CPU_LIMIT=" "${CONFIG_FILE}" 2>/dev/null; then
         echo "GP_CPU_LIMIT=\"${GP_CPU_LIMIT}\"" >> "${CONFIG_FILE}"
     fi
 
     if [[ "${save_needed}" == "true" ]]; then
         chmod 600 "${CONFIG_FILE}"
-        # Reload to ensure consistency
         # shellcheck source=/dev/null
         source "${CONFIG_FILE}"
         echo "INFO: Configuration successfully migrated to ${CONFIG_FILE}" >> "${LOG_FILE}"
@@ -112,7 +109,7 @@ save_config_var() {
 }
 
 # =============================================
-# HELPER FUNCTIONS & ERROR HANDLING
+# HELPER FUNCTIONS
 # =============================================
 
 enhanced_log() {
@@ -216,7 +213,6 @@ install_fail2ban() {
         retry_command dnf install -y fail2ban >/dev/null 2>&1
     fi
     
-    # Configure Jail
     if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
         log "Configuring Fail2Ban SSH jail..."
         cat > "/etc/fail2ban/jail.local" << EOF
@@ -229,13 +225,12 @@ bantime = 1h
 EOF
         systemctl restart fail2ban >/dev/null 2>&1 || true
     fi
-    
     systemctl enable fail2ban >/dev/null 2>&1 || true
     log "Fail2Ban installed and active."
 }
 
 # =============================================
-# CORE SYSTEM FUNCTIONS (Restored Verbosity)
+# CORE SYSTEM FUNCTIONS
 # =============================================
 
 get_enhanced_system_info() {
@@ -327,19 +322,14 @@ ${message}
 
 install_dependencies() {
     log "Installing system dependencies..."
-    
     local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing_cmds+=("$cmd")
-        fi
+        if ! command -v "$cmd" >/dev/null 2>&1; then missing_cmds+=("$cmd"); fi
     done
-    
     if [[ ${#missing_cmds[@]} -eq 0 ]]; then
         log "All dependencies are already installed."
         return 0
     fi
-    
     log "Installing missing: ${missing_cmds[*]}"
     if command -v apt-get >/dev/null 2>&1; then 
         wait_for_apt_locks
@@ -354,9 +344,8 @@ update_system_packages() {
     log "Updating system packages..."
     if command -v apt-get >/dev/null 2>&1; then
         wait_for_apt_locks
-        # Check for phased updates to avoid unnecessary reboots
         if apt list --upgradable 2>/dev/null | grep -q "phased"; then
-             log "Phased updates detected. Skipping full upgrade to avoid reboot loops."
+             log "Phased updates detected. Skipping full upgrade."
              retry_command apt-get upgrade -y >/dev/null 2>&1 || true
         else
              retry_command apt-get upgrade -y >/dev/null 2>&1 || true
@@ -392,7 +381,6 @@ setup_ssh_key() {
             mkdir -p "${SSH_DIR}"
             chmod 700 "${SSH_DIR}"
         fi
-        
         if ! grep -Fq "${SSH_KEY}" "${SSH_DIR}/authorized_keys" 2>/dev/null; then
             echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
             chmod 600 "${SSH_DIR}/authorized_keys"
@@ -407,25 +395,21 @@ setup_ssh_key() {
 
 install_docker() {
     enhanced_log "INFO" "Checking Docker installation..."
-    
     if command -v docker >/dev/null 2>&1; then
         if systemctl is-active docker >/dev/null 2>&1; then
             log "Docker is already installed and active."
             return 0
         fi
     fi
-    
     log "Installing Docker..."
     if ! retry_command curl -fsSL https://get.docker.com -o /tmp/get-docker.sh; then
         enhanced_log "ERROR" "Failed to download Docker install script."
         return 1
     fi
-    
     if ! sh /tmp/get-docker.sh >/dev/null 2>&1; then
         enhanced_log "ERROR" "Docker installation script failed."
         return 1
     fi
-    
     systemctl enable docker >/dev/null 2>&1 || true
     systemctl start docker >/dev/null 2>&1 || true
     return 0
@@ -433,24 +417,19 @@ install_docker() {
 
 configure_smart_swap() {
     log "Checking Swap configuration..."
-    
     local swap_total
     swap_total=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
-    
     if [[ "${swap_total}" -gt 0 ]]; then
         log "Swap is already configured."
         return 0
     fi
-    
     local swap_file="/swapfile"
     local mem_total
     mem_total=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
-    
     if [[ "${mem_total}" -lt 1048576 ]]; then
         log "Creating 1GB Swap file..."
         touch "${swap_file}"
         if command -v chattr >/dev/null 2>&1; then chattr +C "${swap_file}" 2>/dev/null || true; fi
-        
         if dd if=/dev/zero of="${swap_file}" bs=1M count=1024 status=none; then
             chmod 600 "${swap_file}"
             mkswap "${swap_file}" >/dev/null 2>&1
@@ -465,8 +444,11 @@ configure_smart_swap() {
     return 0
 }
 
+# ----------------------------------------------------
+# SMART CONTAINER INSTALLATION (FIXED IN v2.7)
+# ----------------------------------------------------
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v2.6)..."
+    log "Installing Globalping Probe (v2.7)..."
     
     if [[ -z "${ADOPTION_TOKEN}" ]]; then
         enhanced_log "ERROR" "Adoption Token is missing."
@@ -475,47 +457,81 @@ install_enhanced_globalping_probe() {
     
     install_docker || return 1
     
-    # 1. Pull Image (with Retry)
+    # 1. Pull latest image
     log "Pulling Docker Image..."
     if ! retry_command docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
         enhanced_log "ERROR" "Failed to pull Globalping image."
-        enhanced_notify "error" "Docker Error" "Failed to pull image after retries."
         return 1
     fi
 
-    # 2. Cleanup Old
-    if docker ps -a | grep -q globalping-probe; then
-        log "Removing old container..."
-        docker stop globalping-probe >/dev/null 2>&1 || true
-        docker rm globalping-probe >/dev/null 2>&1 || true
+    local recreate_needed=false
+    local container_name="globalping-probe"
+
+    # 2. Smart Check: Does container exist?
+    if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+        log "Container '${container_name}' exists. Checking configuration..."
+        
+        # Check running state
+        local state=$(docker inspect -f '{{.State.Status}}' "${container_name}")
+        
+        # Check Token matches
+        local current_token=$(docker inspect "${container_name}" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
+        
+        # Check Image matches
+        local current_image=$(docker inspect "${container_name}" --format '{{.Image}}')
+        local latest_image=$(docker inspect ghcr.io/jsdelivr/globalping-probe:latest --format '{{.Id}}')
+
+        if [[ "$current_token" != "$ADOPTION_TOKEN" ]]; then
+            log "Configuration Mismatch: Token has changed."
+            recreate_needed=true
+        elif [[ "$current_image" != "$latest_image" ]]; then
+            log "Update available: New image found."
+            recreate_needed=true
+        elif [[ "$state" != "running" ]]; then
+            log "Container is not running. Restarting/Recreating..."
+            recreate_needed=true
+        elif [[ "${FORCE_RECREATE}" == "true" ]]; then
+            log "Force recreate requested."
+            recreate_needed=true
+        else
+            log "Container is up-to-date and running with correct settings."
+            return 0
+        fi
+    else
+        log "Container does not exist. Creating new one..."
+        recreate_needed=true
     fi
     
-    # 3. Prepare Limits
-    local limit_args=""
-    [[ -n "${GP_CPU_LIMIT}" ]] && limit_args+=" --cpus=${GP_CPU_LIMIT}"
-    [[ -n "${GP_MEM_LIMIT}" ]] && limit_args+=" --memory=${GP_MEM_LIMIT}"
-    
-    # 4. Run (With Error Capture!)
-    log "Starting container (Limits: CPU=${GP_CPU_LIMIT:-Default}, MEM=${GP_MEM_LIMIT:-Default})..."
-    
-    local run_output
-    if ! run_output=$(docker run -d \
-        --name globalping-probe \
-        --restart always \
-        --network host \
-        --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
-        ${limit_args} \
-        -e "GP_ADOPTION_TOKEN=${ADOPTION_TOKEN}" \
-        -e "NODE_ENV=production" \
-        -v globalping-data:/home/node/.globalping \
-        ghcr.io/jsdelivr/globalping-probe:latest 2>&1); then
-            enhanced_log "ERROR" "Failed to start Globalping container. Docker Error:"
-            enhanced_log "ERROR" "$run_output"
-            enhanced_notify "error" "Installation Failed" "Docker Error: $run_output"
-            return 1
+    # 3. Recreate if needed
+    if [[ "${recreate_needed}" == "true" ]]; then
+        log "Stopping and removing old container (Force)..."
+        # Using -f (force) prevents "Conflict" errors if container is stuck
+        docker rm -f "${container_name}" >/dev/null 2>&1 || true
+        
+        # Prepare Limits
+        local limit_args=""
+        [[ -n "${GP_CPU_LIMIT}" ]] && limit_args+=" --cpus=${GP_CPU_LIMIT}"
+        [[ -n "${GP_MEM_LIMIT}" ]] && limit_args+=" --memory=${GP_MEM_LIMIT}"
+
+        log "Starting container (Limits: CPU=${GP_CPU_LIMIT:-Default})..."
+        
+        if ! docker run -d \
+            --name "${container_name}" \
+            --restart always \
+            --network host \
+            --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
+            ${limit_args} \
+            -e "GP_ADOPTION_TOKEN=${ADOPTION_TOKEN}" \
+            -e "NODE_ENV=production" \
+            -v globalping-data:/home/node/.globalping \
+            ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
+                enhanced_log "ERROR" "Failed to start container."
+                enhanced_notify "error" "Installation Failed" "Could not start Docker container."
+                return 1
+        fi
+        log "Globalping Probe successfully started."
     fi
-    
-    log "Globalping Probe started successfully."
+
     return 0
 }
 
@@ -524,37 +540,25 @@ perform_enhanced_auto_update() {
     local temp_script="${TMP_DIR}/update_script.sh"
     
     if retry_command curl -sL --connect-timeout 10 -o "${temp_script}" "${SCRIPT_URL}"; then
-        
-        # 1. Integrity Check
         if ! grep -q "END OF SCRIPT" "${temp_script}"; then
             enhanced_notify "error" "Auto-Update" "Download incomplete/corrupt."
             return 1
         fi
-        
-        # 2. Syntax Check (Rollback Protection)
         if ! bash -n "${temp_script}"; then
-            enhanced_notify "error" "Auto-Update" "New script has SYNTAX ERRORS. Aborting update."
+            enhanced_notify "error" "Auto-Update" "New script has SYNTAX ERRORS."
             return 1
         fi
         
-        # 3. Version Check
-        local current_ver
-        local new_ver
-        current_ver=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "0")
-        new_ver=$(grep "^readonly SCRIPT_VERSION=" "${temp_script}" 2>/dev/null | cut -d'"' -f2 || echo "0")
+        local current_ver=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "0")
+        local new_ver=$(grep "^readonly SCRIPT_VERSION=" "${temp_script}" 2>/dev/null | cut -d'"' -f2 || echo "0")
         
         if [[ "${current_ver}" != "${new_ver}" ]]; then
             log "New version found: ${current_ver} -> ${new_ver}"
             cp "${SCRIPT_PATH}" "${SCRIPT_PATH}.backup"
-            
-            if cp "${temp_script}" "${SCRIPT_PATH}"; then
-                chmod +x "${SCRIPT_PATH}"
-                log "Update successful."
-                return 0
-            else
-                enhanced_log "ERROR" "Failed to overwrite script file."
-                return 1
-            fi
+            cp "${temp_script}" "${SCRIPT_PATH}"
+            chmod +x "${SCRIPT_PATH}"
+            log "Update successful."
+            return 0
         else
             log "Script is already up to date."
         fi
@@ -562,31 +566,20 @@ perform_enhanced_auto_update() {
     return 0
 }
 
-# =============================================
-# DIAGNOSTICS & MENU
-# =============================================
-
 run_enhanced_diagnostics() {
-    echo "=== SYSTEM DIAGNOSTICS (v2.6) ==="
+    echo "=== SYSTEM DIAGNOSTICS (v2.7) ==="
     echo "Time: $(date)"
     echo "Host: ${HOSTNAME_NEW} (${PUBLIC_IP})"
     
     echo -e "\n[Hardware]"
-    local cpu_model
-    cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+    local cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
     echo "CPU: ${cpu_model} ($(nproc) Cores)"
     echo "RAM: $(free -h | grep Mem | awk '{print $4}' ) free"
     
     echo -e "\n[Network]"
     echo "IPv4: ${PUBLIC_IP}"
-    local ipv6_addr
-    ipv6_addr=$(ip -6 addr show scope global | grep inet6 | head -1 | awk '{print $2}' | cut -d/ -f1)
-    if [[ -n "${ipv6_addr}" ]]; then
-        echo "IPv6: ${ipv6_addr} (Detected)"
-        if ping6 -c 1 -W 2 google.com >/dev/null 2>&1; then echo "IPv6 Connectivity: OK"; else echo "IPv6 Connectivity: FAIL"; fi
-    else
-        echo "IPv6: Not detected"
-    fi
+    local ipv6_addr=$(ip -6 addr show scope global | grep inet6 | head -1 | awk '{print $2}' | cut -d/ -f1)
+    echo "IPv6: ${ipv6_addr:-Not detected}"
     
     echo -e "\n[Docker]"
     if command -v docker >/dev/null 2>&1; then
@@ -597,8 +590,7 @@ run_enhanced_diagnostics() {
     
     echo -e "\n[Security]"
     if command -v fail2ban-client >/dev/null 2>&1; then echo "Fail2Ban: Installed"; else echo "Fail2Ban: Not installed"; fi
-    local ssh_keys
-    ssh_keys=$(wc -l < "${SSH_DIR}/authorized_keys" 2>/dev/null || echo "0")
+    local ssh_keys=$(wc -l < "${SSH_DIR}/authorized_keys" 2>/dev/null || echo "0")
     echo "SSH Keys: ${ssh_keys} authorized"
     
     echo "================================="
@@ -621,7 +613,7 @@ show_interactive_menu() {
     case "${choice}" in
         1) process_enhanced_args --force ;;
         2)
-            read -p "Enter Adoption Token [Current: ${ADOPTION_TOKEN:0:5}...]: " t_adopt
+            read -p "Enter Adoption Token: " t_adopt
             [[ -n "$t_adopt" ]] && save_config_var "ADOPTION_TOKEN" "$t_adopt"
             read -p "Enter Telegram Bot Token: " t_bot
             [[ -n "$t_bot" ]] && save_config_var "TELEGRAM_TOKEN" "$t_bot"
@@ -638,10 +630,6 @@ show_interactive_menu() {
         *) show_interactive_menu ;;
     esac
 }
-
-# =============================================
-# CLEANUP & MAIN
-# =============================================
 
 perform_uninstall() {
     local force="$1"
@@ -679,7 +667,7 @@ process_enhanced_args() {
         case "$1" in
             --uninstall) uninstall="true"; shift ;;
             --diagnose) diagnose="true"; shift ;;
-            --force) force="true"; shift ;;
+            --force) force="true"; FORCE_RECREATE="true"; shift ;;
             --auto-weekly) auto_weekly="true"; WEEKLY_MODE="true"; shift ;;
             --install-fail2ban) fail2ban="true"; shift ;;
             --test-telegram) telegram_test="true"; shift ;;
@@ -696,7 +684,6 @@ process_enhanced_args() {
     if [[ "$diagnose" == "true" ]]; then run_enhanced_diagnostics; exit 0; fi
     if [[ "$telegram_test" == "true" ]]; then test_telegram_config; exit 0; fi
 
-    # Weekly Mode
     if [[ "$auto_weekly" == "true" ]]; then
         perform_enhanced_auto_update
         enable_tcp_bbr
@@ -706,24 +693,20 @@ process_enhanced_args() {
         exit 0
     fi
 
-    # Default Install - Full Verbosity Restored
+    # Default Install
     check_root
     get_enhanced_system_info
-    
     install_dependencies
     update_system_packages
     configure_hostname
     setup_ssh_key
     configure_smart_swap
     enable_tcp_bbr
-    
-    if [[ "$fail2ban" == "true" ]]; then
-        install_fail2ban
-    fi
+    if [[ "$fail2ban" == "true" ]]; then install_fail2ban; fi
 
     install_enhanced_globalping_probe
     
-    # Auto-Update Setup (Simplified)
+    # Auto-Update Setup
     cp "$0" "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
     cat > "${SYSTEMD_SERVICE_PATH}" << EOF
 [Unit]
@@ -746,7 +729,7 @@ WantedBy=timers.target
 EOF
     systemctl daemon-reload; systemctl enable globalping-update.timer; systemctl start globalping-update.timer
 
-    enhanced_notify "install_success" "Installation Complete" "Setup finished successfully (v2.6)."
+    enhanced_notify "install_success" "Installation Complete" "Setup finished successfully (v2.7)."
     echo "✅ Installation successfully completed."
 }
 
