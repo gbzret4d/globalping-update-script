@@ -86,6 +86,7 @@ safe_calc() {
 }
 
 # Wait for APT/DPKG Locks (Prevents Race Conditions)
+# This fixes the issue where 'apt install unzip' fails during boot
 wait_for_apt_locks() {
     local max_retries=30
     local i=0
@@ -210,7 +211,7 @@ rotate_logs_if_needed() {
     fi
 }
 
-# ENHANCED Telegram Notification
+# ENHANCED Telegram Notification (Now in English)
 enhanced_notify() {
     local level="$1"
     local title="$2"
@@ -248,7 +249,7 @@ enhanced_notify() {
             ;;
     esac
     
-    # Create enhanced message based on level
+    # Create enhanced message based on level (ENGLISH)
     local extended_message
     if [[ "${level}" == "install_success" ]]; then
         # Safely collect system info
@@ -684,7 +685,7 @@ install_dependencies() {
         is_rhel_based=true
     fi
     
-    # List of required commands
+    # List of required commands (unzip included here)
     local required_cmds=("curl" "wget" "grep" "sed" "awk" "bc" "unzip" "tar" "gzip" "find" "xargs")
     local missing_cmds=()
     
