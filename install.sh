@@ -1,5 +1,5 @@
 #!/bin/bash
-set -u # Error on undefined variables
+set -euo pipefail
 
 # =============================================
 # GLOBAL VARIABLES (COMPATIBILITY LAYER)
@@ -14,7 +14,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v3.8-Stable"
+readonly SCRIPT_VERSION="2025.12.21-v3.9-Stable"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly TMP_DIR="/tmp/globalping_install"
@@ -321,8 +321,9 @@ detect_os() {
 install_dependencies() {
     enhanced_log "INFO" "Checking system dependencies..."
     
+    # Removing basic base-tools (awk, sed, grep) from check/install list as they are virtual/base
     local missing_cmds=()
-    for cmd in curl wget grep sed awk bc unzip tar gzip find xargs; do
+    for cmd in curl wget unzip tar gzip bc; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then missing_cmds+=("${cmd}"); fi
     done
     
@@ -336,28 +337,26 @@ install_dependencies() {
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
         
-        # 1. Always update first to ensure package lists are fresh
+        # 1. Always update first
         log "Updating package lists..."
         retry_command apt-get update -q
         
-        # 2. Install WITHOUT silencing output
-        if ! apt-get install -y curl wget awk sed grep coreutils bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
+        # 2. Install specific tools only (removed awk/grep/sed)
+        if ! apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
              warn "Dependency installation failed. Attempting self-repair..."
-             
-             # Repair logic
              dpkg --configure -a || true
              apt-get install --fix-broken -y || true
              
              log "Retrying installation..."
-             retry_command apt-get install -y curl wget awk sed grep coreutils bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
+             retry_command apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
         fi
         
     elif [[ "$OS_TYPE" == "rhel" ]]; then
-        retry_command $PKG_MANAGER install -y curl wget gawk sed grep coreutils bc unzip tar gzip bzip2 xz findutils iproute ca-certificates
+        retry_command $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates
     fi
 }
 
-check_critical_updates() {
+update_system_packages() {
     log "Checking for critical updates..."
     local needs_reboot="false"
 
@@ -438,7 +437,7 @@ ubuntu_pro_attach() {
             log "Ubuntu Pro attached."
             ua enable esm-apps esm-infra livepatch >/dev/null 2>&1 || true
         else
-            err "Ubuntu Pro attachment failed."
+            warn "Ubuntu Pro attachment failed (Check Token)."
         fi
     fi
 }
@@ -535,7 +534,7 @@ install_docker() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v3.8)..."
+    log "Installing Globalping Probe (v3.9)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Adoption Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -546,7 +545,7 @@ install_enhanced_globalping_probe() {
     local cname="globalping-probe"
     local recreate=false
     
-    # Smart Check Logic (SYNTAX FIXED)
+    # Smart Check
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Verifying..."
         local cur_tok=$(docker inspect "$cname" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
@@ -686,7 +685,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v3.8) ==="
+    echo "=== DIAGNOSTICS (v3.9) ==="
     get_enhanced_system_info
     echo "--- Config ---"
     echo "File: $CONFIG_FILE"
@@ -773,7 +772,7 @@ process_args() {
     if [[ "$auto" == "true" ]]; then
         perform_enhanced_auto_update
         enable_tcp_bbr
-        check_critical_updates
+        update_system_packages
         if [[ "$REBOOT_REQUIRED" != "true" ]]; then
              install_enhanced_globalping_probe
         fi
@@ -789,8 +788,10 @@ process_args() {
     get_enhanced_system_info
     enhanced_validate_system
     
-    install_dependencies
+    # Critical steps must exit on failure
+    install_dependencies || exit 1
     update_system_packages
+    
     configure_hostname
     setup_ssh_key
     ubuntu_pro_attach
@@ -806,7 +807,7 @@ process_args() {
         # shutdown -r +2 "Reboot" &
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v3.8)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v3.9)."
     log "✅ Installation complete."
 }
 
