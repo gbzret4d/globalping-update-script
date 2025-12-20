@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -u # Error on undefined variables
 
 # =============================================
 # GLOBAL VARIABLES (COMPATIBILITY LAYER)
@@ -14,7 +14,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v3.7-English"
+readonly SCRIPT_VERSION="2025.12.21-v3.8-Stable"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly TMP_DIR="/tmp/globalping_install"
@@ -114,15 +114,6 @@ save_config_var() {
 # =============================================
 # 1. HELPERS & LOGGING
 # =============================================
-
-safe_calc() {
-    local op="$1"
-    case "${op}" in
-        "gb_from_kb") echo $(($2 / 1024 / 1024)) ;;
-        "mb_from_kb") echo $(($2 / 1024)) ;;
-        *) echo "0" ;;
-    esac
-}
 
 setup_colors() {
     if [ -t 1 ]; then
@@ -239,6 +230,9 @@ enhanced_notify() {
     local load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
     local virt_type=$(systemd-detect-virt 2>/dev/null || echo "Bare Metal")
     
+    local fail2ban_stat="Not Installed"
+    if command -v fail2ban-client >/dev/null 2>&1; then fail2ban_stat="Active"; fi
+    
     local extended_message="${icon} ${emoji}
 
 🌍 SERVER DETAILS:
@@ -254,14 +248,15 @@ enhanced_notify() {
 ├─ Disk: ${disk_info}
 └─ Load: ${load_info}
 
+🔧 SERVICES:
+├─ Fail2Ban: ${fail2ban_stat}
+├─ SSH Key: ${SSH_KEY:+Configured}${SSH_KEY:-Not set}
+└─ Ubuntu Pro: ${UBUNTU_PRO_TOKEN:+Active}${UBUNTU_PRO_TOKEN:-Not used}
+
 📋 ${title}:
 ${message}
 
-🔗 LINKS:
-├─ [Geo Map](https://db-ip.com/${PUBLIC_IP})
-└─ [BGP Routing](https://bgp.he.net/${ASN})
-
-📊 Logs: /var/log/globalping-install.log"
+📊 Logs: ${LOG_FILE}"
 
     curl -s -X POST --connect-timeout 10 \
         -d "chat_id=${TELEGRAM_CHAT}" \
@@ -345,7 +340,7 @@ install_dependencies() {
         log "Updating package lists..."
         retry_command apt-get update -q
         
-        # 2. Install WITHOUT silencing output (User needs to see errors)
+        # 2. Install WITHOUT silencing output
         if ! apt-get install -y curl wget awk sed grep coreutils bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
              warn "Dependency installation failed. Attempting self-repair..."
              
@@ -500,6 +495,7 @@ install_fail2ban() {
         echo -e "[sshd]\nenabled=true\nport=ssh\nmaxretry=5\nbantime=1h" > /etc/fail2ban/jail.local
         systemctl restart fail2ban >/dev/null 2>&1 || true
     fi
+    systemctl enable fail2ban >/dev/null 2>&1 || true
 }
 
 # =============================================
@@ -533,13 +529,13 @@ install_docker() {
              return 1
         fi
     fi
-    systemctl enable --now docker
+    systemctl enable --now docker >/dev/null 2>&1
     log "Docker installed."
     return 0
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v3.7)..."
+    log "Installing Globalping Probe (v3.8)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Adoption Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -550,7 +546,7 @@ install_enhanced_globalping_probe() {
     local cname="globalping-probe"
     local recreate=false
     
-    # Smart Check
+    # Smart Check Logic (SYNTAX FIXED)
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Verifying..."
         local cur_tok=$(docker inspect "$cname" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
@@ -558,10 +554,18 @@ install_enhanced_globalping_probe() {
         local new_img=$(docker inspect ghcr.io/jsdelivr/globalping-probe:latest --format '{{.Id}}')
         local state=$(docker inspect -f '{{.State.Status}}' "$cname")
         
-        if [[ "$cur_tok" != "$ADOPTION_TOKEN" ]]; then recreate=true; log "Reason: Token changed."; fi
-        elif [[ "$cur_img" != "$new_img" ]]; then recreate=true; log "Reason: New image."; fi
-        elif [[ "$state" != "running" ]]; then recreate=true; log "Reason: Stopped."; fi
-        elif [[ "${FORCE_RECREATE}" == "true" ]]; then recreate=true; log "Reason: Forced."; fi
+        if [[ "$cur_tok" != "$ADOPTION_TOKEN" ]]; then
+            recreate=true
+            log "Reason: Token changed."
+        elif [[ "$cur_img" != "$new_img" ]]; then
+            recreate=true
+            log "Reason: New image available."
+        elif [[ "$state" != "running" ]]; then
+            recreate=true
+            log "Reason: Container not running."
+        elif [[ "${FORCE_RECREATE}" == "true" ]]; then
+            recreate=true
+            log "Reason: Forced recreation."
         else
             log "Container is up-to-date."
             return 0
@@ -682,7 +686,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v3.7) ==="
+    echo "=== DIAGNOSTICS (v3.8) ==="
     get_enhanced_system_info
     echo "--- Config ---"
     echo "File: $CONFIG_FILE"
@@ -802,7 +806,7 @@ process_args() {
         # shutdown -r +2 "Reboot" &
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v3.7)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v3.8)."
     log "✅ Installation complete."
 }
 
