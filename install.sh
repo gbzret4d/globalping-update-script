@@ -14,9 +14,10 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v4.1-FinalFix"
+readonly SCRIPT_VERSION="2025.12.21-v4.2-Fixed"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
+readonly LOCK_FILE="/var/lock/globalping-manager.lock"
 readonly TMP_DIR="/tmp/globalping_install"
 readonly SSH_DIR="/root/.ssh"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/gbzret4d/globalping-update-script/main/install.sh"
@@ -42,6 +43,7 @@ WEEKLY_MODE="false"
 REBOOT_REQUIRED="false"
 TELEGRAM_SENT="false"
 FORCE_RECREATE="false"
+DRY_RUN="false"
 
 # Defaults
 GP_CPU_LIMIT="0.90"
@@ -57,7 +59,19 @@ OS_TYPE=""
 PKG_MANAGER=""
 
 # =============================================
-# 0. CONFIG MIGRATION
+# 0. LOCKING & SETUP
+# =============================================
+
+acquire_lock() {
+    exec 200>"$LOCK_FILE"
+    if ! flock -n 200; then
+        echo "❌ Script is already running! Aborting."
+        exit 1
+    fi
+}
+
+# =============================================
+# 1. CONFIG MIGRATION
 # =============================================
 
 load_and_migrate_config() {
@@ -112,7 +126,7 @@ save_config_var() {
 }
 
 # =============================================
-# 1. HELPERS & LOGGING
+# 2. HELPERS & LOGGING
 # =============================================
 
 setup_colors() {
@@ -180,8 +194,16 @@ check_root() {
     fi
 }
 
+run_cmd() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        enhanced_log "DRY" "Would execute: $*"
+        return 0
+    fi
+    "$@"
+}
+
 # =============================================
-# 2. SYSTEM INFO & TELEGRAM
+# 3. SYSTEM INFO & TELEGRAM
 # =============================================
 
 get_enhanced_system_info() {
@@ -266,7 +288,7 @@ ${message}
 }
 
 # =============================================
-# 3. SYSTEM VALIDATION
+# 4. SYSTEM VALIDATION
 # =============================================
 
 enhanced_validate_system() {
@@ -301,7 +323,7 @@ enhanced_validate_system() {
 }
 
 # =============================================
-# 4. INSTALLATION
+# 5. INSTALLATION & SETUP
 # =============================================
 
 detect_os() {
@@ -321,7 +343,6 @@ detect_os() {
 install_dependencies() {
     enhanced_log "INFO" "Checking system dependencies..."
     
-    # Missing command check
     local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then missing_cmds+=("${cmd}"); fi
@@ -336,8 +357,6 @@ install_dependencies() {
     
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
-        
-        # Always update lists
         log "Updating package lists..."
         retry_command apt-get update -q
         
@@ -345,8 +364,6 @@ install_dependencies() {
              warn "Dependency installation failed. Attempting self-repair..."
              dpkg --configure -a || true
              apt-get install --fix-broken -y || true
-             
-             log "Retrying installation..."
              retry_command apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
         fi
         
@@ -355,42 +372,48 @@ install_dependencies() {
     fi
 }
 
+# --- THIS FUNCTION WAS MISSING IN v4.1 ---
+update_system_packages() {
+    log "Updating system packages..."
+    if [[ "$OS_TYPE" == "debian" ]]; then
+        wait_for_apt_locks
+        
+        # Check for phased updates
+        if apt list --upgradable 2>/dev/null | grep -q "phased"; then
+             log "Phased updates detected. Running safe upgrade only."
+             run_cmd apt-get upgrade -y || true
+        else
+             run_cmd apt-get upgrade -y || true
+        fi
+        
+        run_cmd apt-get autoremove -y || true
+        
+    elif [[ "$OS_TYPE" == "rhel" ]]; then
+        run_cmd $PKG_MANAGER update -y || true
+    fi
+}
+# ----------------------------------------
+
 check_critical_updates() {
     log "Checking for critical updates..."
     local needs_reboot="false"
 
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
-        if ! timeout "${TIMEOUT_PACKAGE}" apt-get update >/dev/null 2>&1; then
-            enhanced_log "WARN" "apt-get update failed"
-            return 0
-        fi
-
-        if apt list --upgradable 2>/dev/null | grep -q "phased"; then
-             log "Phased updates detected. Installing safe upgrades only."
-             DEBIAN_FRONTEND=noninteractive apt-get upgrade -y >/dev/null 2>&1 || true
-             return 0
-        fi
         
         local updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" || echo "")
         if echo "$updates" | grep -qE "linux-image|systemd|libc6"; then
-             log "Critical updates found. Installing..."
-             DEBIAN_FRONTEND=noninteractive apt-get upgrade -y >/dev/null 2>&1 || true
+             log "Critical updates (kernel/systemd) found."
              needs_reboot="true"
         fi
         
     elif [[ "$OS_TYPE" == "rhel" ]]; then
          if $PKG_MANAGER check-update kernel >/dev/null 2>&1; then
-             $PKG_MANAGER update -y kernel >/dev/null 2>&1
              needs_reboot="true"
          fi
-         $PKG_MANAGER update -y --security >/dev/null 2>&1 || true
     fi
 
-    # Check for pending reboot marker
-    if [[ -f /var/run/reboot-required ]]; then
-        needs_reboot="true"
-    fi
+    if [[ -f /var/run/reboot-required ]]; then needs_reboot="true"; fi
 
     if [[ "${needs_reboot}" == "true" ]]; then
         log "Reboot required for updates."
@@ -500,7 +523,7 @@ install_fail2ban() {
 }
 
 # =============================================
-# 5. DOCKER & CONTAINER
+# 6. DOCKER & CONTAINER
 # =============================================
 
 install_docker() {
@@ -536,7 +559,7 @@ install_docker() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v4.1)..."
+    log "Installing Globalping Probe (v4.2)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Adoption Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -547,7 +570,7 @@ install_enhanced_globalping_probe() {
     local cname="globalping-probe"
     local recreate_needed=false
     
-    # Smart Check Logic (Fixed Syntax)
+    # Smart Check Logic
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Verifying..."
         
@@ -603,7 +626,7 @@ install_enhanced_globalping_probe() {
 }
 
 # =============================================
-# 6. UPDATER & CLEANUP
+# 7. UPDATER & CLEANUP
 # =============================================
 
 perform_enhanced_auto_update() {
@@ -684,11 +707,11 @@ EOF
 }
 
 # =============================================
-# 7. MAIN CONTROL
+# 8. MAIN CONTROL
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v4.1) ==="
+    echo "=== DIAGNOSTICS (v4.2) ==="
     get_enhanced_system_info
     echo "--- Config ---"
     echo "File: $CONFIG_FILE"
@@ -775,6 +798,7 @@ process_args() {
     if [[ "$auto" == "true" ]]; then
         perform_enhanced_auto_update
         enable_tcp_bbr
+        update_system_packages
         check_critical_updates
         if [[ "$REBOOT_REQUIRED" != "true" ]]; then
              install_enhanced_globalping_probe
@@ -784,7 +808,9 @@ process_args() {
     fi
 
     # INSTALL FLOW
+    acquire_lock
     check_root
+    run_preflight_checks
     setup_colors
     detect_os
     
@@ -793,6 +819,7 @@ process_args() {
     
     install_dependencies
     update_system_packages
+    
     configure_hostname
     setup_ssh_key
     ubuntu_pro_attach
@@ -803,12 +830,15 @@ process_args() {
     install_enhanced_globalping_probe
     setup_auto_update_systemd
     
+    # Check if a reboot is pending after all updates
+    check_critical_updates
+    
     if [[ "$REBOOT_REQUIRED" == "true" ]]; then
         log "Reboot required for updates."
         shutdown -r +2 "Reboot" &
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v4.1)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v4.2)."
     log "✅ Installation complete."
 }
 
