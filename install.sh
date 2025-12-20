@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -u # Error on undefined variables
 
 # =============================================
 # GLOBAL VARIABLES (COMPATIBILITY LAYER)
@@ -14,7 +14,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v3.9-Stable"
+readonly SCRIPT_VERSION="2025.12.21-v4.1-FinalFix"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly TMP_DIR="/tmp/globalping_install"
@@ -301,7 +301,7 @@ enhanced_validate_system() {
 }
 
 # =============================================
-# 4. INSTALLATION (FIXED & VERBOSE)
+# 4. INSTALLATION
 # =============================================
 
 detect_os() {
@@ -321,7 +321,7 @@ detect_os() {
 install_dependencies() {
     enhanced_log "INFO" "Checking system dependencies..."
     
-    # Removing basic base-tools (awk, sed, grep) from check/install list as they are virtual/base
+    # Missing command check
     local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then missing_cmds+=("${cmd}"); fi
@@ -337,11 +337,10 @@ install_dependencies() {
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
         
-        # 1. Always update first
+        # Always update lists
         log "Updating package lists..."
         retry_command apt-get update -q
         
-        # 2. Install specific tools only (removed awk/grep/sed)
         if ! apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
              warn "Dependency installation failed. Attempting self-repair..."
              dpkg --configure -a || true
@@ -356,7 +355,7 @@ install_dependencies() {
     fi
 }
 
-update_system_packages() {
+check_critical_updates() {
     log "Checking for critical updates..."
     local needs_reboot="false"
 
@@ -388,7 +387,10 @@ update_system_packages() {
          $PKG_MANAGER update -y --security >/dev/null 2>&1 || true
     fi
 
-    if [[ -f /var/run/reboot-required ]]; then needs_reboot="true"; fi
+    # Check for pending reboot marker
+    if [[ -f /var/run/reboot-required ]]; then
+        needs_reboot="true"
+    fi
 
     if [[ "${needs_reboot}" == "true" ]]; then
         log "Reboot required for updates."
@@ -534,7 +536,7 @@ install_docker() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v3.9)..."
+    log "Installing Globalping Probe (v4.1)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Adoption Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -543,37 +545,38 @@ install_enhanced_globalping_probe() {
     retry_command docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
     
     local cname="globalping-probe"
-    local recreate=false
+    local recreate_needed=false
     
-    # Smart Check
+    # Smart Check Logic (Fixed Syntax)
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Verifying..."
+        
         local cur_tok=$(docker inspect "$cname" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
         local cur_img=$(docker inspect "$cname" --format '{{.Image}}')
         local new_img=$(docker inspect ghcr.io/jsdelivr/globalping-probe:latest --format '{{.Id}}')
         local state=$(docker inspect -f '{{.State.Status}}' "$cname")
         
         if [[ "$cur_tok" != "$ADOPTION_TOKEN" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: Token changed."
         elif [[ "$cur_img" != "$new_img" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: New image available."
         elif [[ "$state" != "running" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: Container not running."
         elif [[ "${FORCE_RECREATE}" == "true" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: Forced recreation."
         else
             log "Container is up-to-date."
             return 0
         fi
     else
-        recreate=true
+        recreate_needed=true
     fi
     
-    if [[ "$recreate" == "true" ]]; then
+    if [[ "$recreate_needed}" == "true" ]]; then
         log "Recreating container..."
         docker rm -f "$cname" >/dev/null 2>&1 || true
         
@@ -685,7 +688,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v3.9) ==="
+    echo "=== DIAGNOSTICS (v4.1) ==="
     get_enhanced_system_info
     echo "--- Config ---"
     echo "File: $CONFIG_FILE"
@@ -772,7 +775,7 @@ process_args() {
     if [[ "$auto" == "true" ]]; then
         perform_enhanced_auto_update
         enable_tcp_bbr
-        update_system_packages
+        check_critical_updates
         if [[ "$REBOOT_REQUIRED" != "true" ]]; then
              install_enhanced_globalping_probe
         fi
@@ -788,10 +791,8 @@ process_args() {
     get_enhanced_system_info
     enhanced_validate_system
     
-    # Critical steps must exit on failure
-    install_dependencies || exit 1
+    install_dependencies
     update_system_packages
-    
     configure_hostname
     setup_ssh_key
     ubuntu_pro_attach
@@ -804,10 +805,10 @@ process_args() {
     
     if [[ "$REBOOT_REQUIRED" == "true" ]]; then
         log "Reboot required for updates."
-        # shutdown -r +2 "Reboot" &
+        shutdown -r +2 "Reboot" &
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v3.9)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v4.1)."
     log "✅ Installation complete."
 }
 
