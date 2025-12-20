@@ -4,8 +4,8 @@ set -euo pipefail
 # =============================================
 # GLOBAL VARIABLES & COMPATIBILITY LAYER
 # =============================================
-# ACHTUNG: Diese leeren Variablen MÜSSEN hier stehen bleiben.
-# Alte Versionen des Skripts nutzen 'sed', um hier Werte einzutragen.
+# WARNING: Do NOT remove or reorder these empty variables.
+# Older versions of this script use 'sed' to inject values into these specific lines during auto-update.
 UBUNTU_PRO_TOKEN=""
 TELEGRAM_TOKEN=""
 TELEGRAM_CHAT=""
@@ -15,27 +15,32 @@ ADOPTION_TOKEN=""
 # =============================================
 # CONSTANTS & CONFIGURATION
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v2.9"
+readonly SCRIPT_VERSION="2025.12.21-v3.0"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly TMP_DIR="/tmp/globalping_install"
 readonly SSH_DIR="/root/.ssh"
+# URL points to the raw version of this script
 readonly SCRIPT_URL="https://raw.githubusercontent.com/gbzret4d/globalping-update-script/main/install.sh"
 readonly SCRIPT_PATH="/usr/local/bin/install_globalping.sh"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
 
-# Resource Limits (Defaults) - Override in config.env
-GP_CPU_LIMIT="0.90"   # 90% of one core
-GP_MEM_LIMIT=""       # Empty = Docker default
+# Resource Limits (Defaults) - Can be overridden in config.env
+GP_CPU_LIMIT="0.90"   # Limit to 90% of one core
+GP_MEM_LIMIT=""       # Leave empty for Docker default, or use e.g., "512m"
 
-# System Requirements
+# Requirements
 readonly MIN_FREE_SPACE_GB="1.5"
 readonly MIN_RAM_MB="256"
 readonly MAX_LOG_SIZE_MB="50"
+readonly SWAP_MIN_TOTAL_GB="1"
+readonly MIN_DISK_FOR_SWAP_GB="10"
 
 # Timeouts
 readonly TIMEOUT_NETWORK="15"
+readonly TIMEOUT_PACKAGE="1800"
+readonly TIMEOUT_DOCKER="900"
 
 # Runtime State
 DEBUG_MODE="false"
@@ -52,7 +57,7 @@ ASN=""
 PROVIDER=""
 
 # =============================================
-# 1. CONFIGURATION MIGRATION SYSTEM
+# CONFIGURATION MIGRATION SYSTEM
 # =============================================
 
 load_and_migrate_config() {
@@ -62,13 +67,14 @@ load_and_migrate_config() {
         chmod 700 "$(dirname "${CONFIG_FILE}")"
     fi
 
-    # 1. Load existing config
+    # 1. Load existing config file
     if [[ -f "${CONFIG_FILE}" ]]; then
         # shellcheck source=/dev/null
         source "${CONFIG_FILE}"
     fi
 
     # 2. MIGRATION: Check if variables were injected by old update script
+    # If variables at top of script are set, but missing in config file -> Save them.
     local save_needed=false
 
     migrate_var() {
@@ -86,14 +92,14 @@ load_and_migrate_config() {
     migrate_var "SSH_KEY" "${SSH_KEY}"
     migrate_var "UBUNTU_PRO_TOKEN" "${UBUNTU_PRO_TOKEN}"
 
-    # 3. Save Defaults if missing
+    # 3. Save Resource Limits defaults if missing
     if ! grep -q "GP_CPU_LIMIT=" "${CONFIG_FILE}" 2>/dev/null; then
         echo "GP_CPU_LIMIT=\"${GP_CPU_LIMIT}\"" >> "${CONFIG_FILE}"
     fi
 
     if [[ "${save_needed}" == "true" ]]; then
         chmod 600 "${CONFIG_FILE}"
-        # Reload to ensure consistency
+        # Reload to ensure environment is clean
         # shellcheck source=/dev/null
         source "${CONFIG_FILE}"
         echo "[INFO] Configuration successfully migrated to ${CONFIG_FILE}" >> "${LOG_FILE}"
@@ -103,6 +109,7 @@ load_and_migrate_config() {
 save_config_var() {
     local key="$1"
     local value="$2"
+    
     mkdir -p "$(dirname "${CONFIG_FILE}")"
     touch "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}"
@@ -115,7 +122,7 @@ save_config_var() {
 }
 
 # =============================================
-# 2. HELPER FUNCTIONS & LOGGING
+# HELPER FUNCTIONS & LOGGING
 # =============================================
 
 setup_colors() {
@@ -126,7 +133,11 @@ setup_colors() {
         BLUE='\033[0;34m'
         NC='\033[0m' # No Color
     else
-        RED=""; GREEN=""; YELLOW=""; BLUE=""; NC=""
+        RED=""
+        GREEN=""
+        YELLOW=""
+        BLUE=""
+        NC=""
     fi
 }
 
@@ -146,7 +157,6 @@ enhanced_log() {
         *)       prefix="📝 [${level}]"; color="${NC}" ;;
     esac
     
-    # Log to file (plain text)
     mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
     echo "[${timestamp}] ${prefix} ${message}" >> "${LOG_FILE}"
     
@@ -158,32 +168,11 @@ log() { enhanced_log "INFO" "$1"; }
 warn() { enhanced_log "WARN" "$1"; }
 err() { enhanced_log "ERROR" "$1"; }
 
-retry_command() {
-    local retries=3
-    local count=0
-    local delay=5
-    local cmd="$*"
-
-    until "$@"; do
-        exit_code=$?
-        count=$((count + 1))
-        if [ $count -lt $retries ]; then
-            warn "Command failed (Attempt $count/$retries): $cmd"
-            sleep $delay
-        else
-            err "Command failed after $retries attempts: $cmd"
-            return $exit_code
-        fi
-    done
-    return 0
-}
-
 wait_for_apt_locks() {
-    local max_retries=60
-    local i=0
-    
     # Only check on Debian/Ubuntu systems
     if [ -f /etc/debian_version ]; then
+        local max_retries=60
+        local i=0
         while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
               fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
               fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
@@ -207,8 +196,85 @@ check_root() {
     return 0
 }
 
+retry_command() {
+    local retries=3
+    local count=0
+    local delay=5
+    local cmd="$*"
+
+    until "$@"; do
+        exit_code=$?
+        count=$((count + 1))
+        if [ $count -lt $retries ]; then
+            warn "Command failed (Attempt $count/$retries): $cmd"
+            sleep $delay
+        else
+            err "Command failed after $retries attempts: $cmd"
+            return $exit_code
+        fi
+    done
+    return 0
+}
+
 # =============================================
-# 3. SYSTEM INFORMATION & TELEGRAM
+# NEW FEATURE: TCP BBR & FAIL2BAN
+# =============================================
+
+enable_tcp_bbr() {
+    log "Checking TCP BBR Congestion Control..."
+    if grep -q "bbr" /etc/sysctl.conf; then
+        log "TCP BBR is already enabled."
+        return 0
+    fi
+    
+    log "Enabling TCP BBR for better network performance..."
+    if ! echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf; then
+        warn "Could not write to sysctl.conf"
+        return 1
+    fi
+    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+    
+    if sysctl -p >/dev/null 2>&1; then
+        log "TCP BBR successfully enabled."
+    else
+        warn "Could not apply sysctl settings."
+    fi
+}
+
+install_fail2ban() {
+    if command -v fail2ban-client >/dev/null 2>&1; then 
+        log "Fail2Ban is already installed."
+        return 0
+    fi
+    
+    log "Installing Fail2Ban..."
+    if command -v apt-get >/dev/null 2>&1; then
+        wait_for_apt_locks
+        retry_command apt-get install -y fail2ban >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        retry_command dnf install -y fail2ban >/dev/null 2>&1
+    fi
+    
+    # Configure Jail
+    if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
+        log "Configuring Fail2Ban SSH jail..."
+        cat > "/etc/fail2ban/jail.local" << EOF
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+maxretry = 5
+bantime = 1h
+EOF
+        systemctl restart fail2ban >/dev/null 2>&1 || true
+    fi
+    
+    systemctl enable fail2ban >/dev/null 2>&1 || true
+    log "Fail2Ban installed and active."
+}
+
+# =============================================
+# CORE SYSTEM FUNCTIONS
 # =============================================
 
 get_enhanced_system_info() {
@@ -227,20 +293,17 @@ get_enhanced_system_info() {
             PROVIDER=$(echo "$asn_raw" | sed 's/^AS[0-9]* //' | tr ' ' '-' | tr -cd '[:alnum:] -')
         fi
     fi
-    
-    # Fallbacks
-    [[ -z "${COUNTRY}" ]] && COUNTRY="XX"
-    [[ -z "${ASN}" ]] && ASN="unknown"
-    [[ -z "${PROVIDER}" ]] && PROVIDER="unknown"
+    [[ -z "$COUNTRY" ]] && COUNTRY="XX"
+    [[ -z "$ASN" ]] && ASN="unknown"
+    [[ -z "$PROVIDER" ]] && PROVIDER="unknown"
 
     if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
-        # Intelligent Hostname Generation
         HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
+        # Sanitize hostname
         HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | cut -c1-63)
     else
         HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-node")
     fi
-    
     log "System Identification: IP=${PUBLIC_IP}, Host=${HOSTNAME_NEW}, ISP=${PROVIDER}, ASN=${ASN}"
 }
 
@@ -249,15 +312,11 @@ enhanced_notify() {
     local title="$2"
     local message="$3"
 
-    # Avoid duplicate success messages
     if [[ "${TELEGRAM_SENT}" == "true" && "${level}" == "install_success" ]]; then return 0; fi
-    # Only send Errors and Install Success
     if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then return 0; fi
-    # Check config
     if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then return 0; fi
 
-    # Ensure we have data
-    if [[ -z "${COUNTRY}" ]]; then get_enhanced_system_info; fi
+    [[ -z "${COUNTRY}" ]] && get_enhanced_system_info
 
     local icon emoji
     if [[ "${level}" == "install_success" ]]; then
@@ -266,7 +325,7 @@ enhanced_notify() {
         icon="❌"; emoji="CRITICAL ERROR"
     fi
 
-    # --- RESTORED DETAILED STATS ---
+    # Detailed System Stats
     local ram_info disk_info load_info virt_type
     ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")
     disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5")"}' || echo "?")
@@ -309,22 +368,22 @@ ${message}
 
 📊 Logs: /var/log/globalping-install.log"
 
-    # Send with simplified curl but keep full message
+    # Send via curl with error check
     if ! curl -s -X POST --connect-timeout 10 \
         -d "chat_id=${TELEGRAM_CHAT}" \
         -d "text=${extended_message}" \
         -d "parse_mode=Markdown" \
         "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" >/dev/null 2>&1; then
-            warn "Failed to send Telegram notification (Network/Token issue)."
+            warn "Failed to send Telegram notification."
     fi
 }
 
 # =============================================
-# 4. INSTALLATION & OPTIMIZATION
+# 4. INSTALLATION & MAINTENANCE LOGIC
 # =============================================
 
 install_dependencies() {
-    log "Checking and installing dependencies..."
+    log "Checking and installing system dependencies..."
     
     local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
@@ -383,8 +442,43 @@ configure_hostname() {
     fi
 }
 
+setup_ssh_key() {
+    log "Configuring SSH Access..."
+    if [[ -n "${SSH_KEY}" ]]; then
+        if [[ ! -d "${SSH_DIR}" ]]; then
+            mkdir -p "${SSH_DIR}"
+            chmod 700 "${SSH_DIR}"
+        fi
+        
+        if ! grep -Fq "${SSH_KEY}" "${SSH_DIR}/authorized_keys" 2>/dev/null; then
+            echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
+            chmod 600 "${SSH_DIR}/authorized_keys"
+            log "SSH Key added successfully."
+        else
+            log "SSH Key already exists."
+        fi
+    else
+        log "No SSH Key provided."
+    fi
+}
+
+ubuntu_pro_attach() {
+    if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release; then
+        log "Attaching Ubuntu Pro..."
+        if ! command -v ua >/dev/null 2>&1; then
+            retry_command apt-get install -y ubuntu-advantage-tools >/dev/null 2>&1 || true
+        fi
+        if ua attach "${UBUNTU_PRO_TOKEN}" >/dev/null 2>&1; then
+            log "Ubuntu Pro attached."
+            ua enable esm-apps esm-infra livepatch >/dev/null 2>&1 || true
+        else
+            err "Ubuntu Pro attachment failed."
+        fi
+    fi
+}
+
 install_docker() {
-    log "Checking Docker status..."
+    log "Checking Docker installation..."
     
     if command -v docker >/dev/null 2>&1; then
         if systemctl is-active docker >/dev/null 2>&1; then
@@ -427,7 +521,6 @@ configure_smart_swap() {
     local mem_total
     mem_total=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
     
-    # Only if RAM < 1GB
     if [[ "${mem_total}" -lt 1048576 ]]; then
         log "Low RAM detected (<1GB). Creating 1GB Swap file..."
         touch "${swap_file}"
@@ -449,64 +542,8 @@ configure_smart_swap() {
     return 0
 }
 
-enable_tcp_bbr() {
-    log "Checking TCP BBR Congestion Control..."
-    if grep -q "bbr" /etc/sysctl.conf; then
-        log "TCP BBR is already enabled."
-        return 0
-    fi
-    
-    log "Enabling TCP BBR..."
-    if ! echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf; then
-        warn "Could not write to sysctl.conf"
-        return 1
-    fi
-    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
-    
-    if sysctl -p >/dev/null 2>&1; then
-        log "TCP BBR successfully enabled."
-    else
-        warn "Could not apply sysctl settings."
-    fi
-}
-
-install_fail2ban() {
-    if command -v fail2ban-client >/dev/null 2>&1; then 
-        log "Fail2Ban is already installed."
-        return 0
-    fi
-    
-    log "Installing Fail2Ban..."
-    if command -v apt-get >/dev/null 2>&1; then
-        wait_for_apt_locks
-        retry_command apt-get install -y fail2ban >/dev/null 2>&1
-    elif command -v dnf >/dev/null 2>&1; then
-        retry_command dnf install -y fail2ban >/dev/null 2>&1
-    fi
-    
-    if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
-        log "Configuring Fail2Ban SSH jail..."
-        cat > "/etc/fail2ban/jail.local" << EOF
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-maxretry = 5
-bantime = 1h
-EOF
-        systemctl restart fail2ban >/dev/null 2>&1 || true
-    fi
-    
-    systemctl enable fail2ban >/dev/null 2>&1 || true
-    log "Fail2Ban installed and active."
-}
-
-# =============================================
-# 5. CONTAINER LOGIC (SMART & VERBOSE)
-# =============================================
-
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v2.9)..."
+    log "Installing Globalping Probe (v3.0)..."
     
     if [[ -z "${ADOPTION_TOKEN}" ]]; then
         err "Adoption Token is missing. Please provide it via --adoption-token or config."
@@ -515,7 +552,6 @@ install_enhanced_globalping_probe() {
     
     install_docker || return 1
     
-    # 1. Pull Image
     log "Pulling latest Docker Image..."
     if ! retry_command docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
         err "Failed to pull Globalping image."
@@ -523,26 +559,17 @@ install_enhanced_globalping_probe() {
         return 1
     fi
 
-    # 2. Smart Check Logic
     local container_name="globalping-probe"
     local recreate_needed=false
     
+    # Smart Check Logic
     if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
         log "Container '${container_name}' found. Checking status..."
         
-        # Check running state
-        local state
-        state=$(docker inspect -f '{{.State.Status}}' "${container_name}")
-        
-        # Check Token
-        local current_token
-        current_token=$(docker inspect "${container_name}" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
-        
-        # Check Image
-        local current_image
-        current_image=$(docker inspect "${container_name}" --format '{{.Image}}')
-        local latest_image
-        latest_image=$(docker inspect ghcr.io/jsdelivr/globalping-probe:latest --format '{{.Id}}')
+        local state=$(docker inspect -f '{{.State.Status}}' "${container_name}")
+        local current_token=$(docker inspect "${container_name}" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
+        local current_image=$(docker inspect "${container_name}" --format '{{.Image}}')
+        local latest_image=$(docker inspect ghcr.io/jsdelivr/globalping-probe:latest --format '{{.Id}}')
 
         if [[ "$current_token" != "$ADOPTION_TOKEN" ]]; then
             log "Reason for update: Token has changed."
@@ -565,19 +592,17 @@ install_enhanced_globalping_probe() {
         recreate_needed=true
     fi
 
-    # 3. Recreate if needed
+    # Recreate if needed
     if [[ "${recreate_needed}" == "true" ]]; then
         log "Stopping and removing old container (Force)..."
         docker rm -f "${container_name}" >/dev/null 2>&1 || true
         
-        # Prepare Limits
         local limit_args=""
         [[ -n "${GP_CPU_LIMIT}" ]] && limit_args+=" --cpus=${GP_CPU_LIMIT}"
         [[ -n "${GP_MEM_LIMIT}" ]] && limit_args+=" --memory=${GP_MEM_LIMIT}"
         
         log "Starting container (Limits: CPU=${GP_CPU_LIMIT:-Default}, MEM=${GP_MEM_LIMIT:-Default})..."
         
-        # Run and capture output
         local run_output
         if ! run_output=$(docker run -d \
             --name "${container_name}" \
@@ -606,23 +631,18 @@ perform_enhanced_auto_update() {
     
     if retry_command curl -sL --connect-timeout 10 -o "${temp_script}" "${SCRIPT_URL}"; then
         
-        # 1. Integrity Check
         if ! grep -q "END OF SCRIPT" "${temp_script}"; then
             enhanced_notify "error" "Auto-Update" "Download incomplete/corrupt."
             return 1
         fi
         
-        # 2. Syntax Check
         if ! bash -n "${temp_script}"; then
             enhanced_notify "error" "Auto-Update" "New script has SYNTAX ERRORS."
             return 1
         fi
         
-        # 3. Version Check
-        local current_ver
-        local new_ver
-        current_ver=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "0")
-        new_ver=$(grep "^readonly SCRIPT_VERSION=" "${temp_script}" 2>/dev/null | cut -d'"' -f2 || echo "0")
+        local current_ver=$(grep "^readonly SCRIPT_VERSION=" "${SCRIPT_PATH}" 2>/dev/null | cut -d'"' -f2 || echo "0")
+        local new_ver=$(grep "^readonly SCRIPT_VERSION=" "${temp_script}" 2>/dev/null | cut -d'"' -f2 || echo "0")
         
         if [[ "${current_ver}" != "${new_ver}" ]]; then
             log "New version found: ${current_ver} -> ${new_ver}"
@@ -640,20 +660,23 @@ perform_enhanced_auto_update() {
 
 perform_aggressive_cleanup() {
     log "🧹 Starting aggressive cleanup..."
+    
     if command -v docker >/dev/null 2>&1; then
         log "Pruning Docker (unused images/volumes)..."
         docker system prune -a -f --volumes >/dev/null 2>&1 || true
     fi
+
     if command -v apt-get >/dev/null 2>&1; then
         wait_for_apt_locks
         log "Cleaning Apt cache..."
         apt-get autoremove -y >/dev/null 2>&1 || true
         apt-get clean >/dev/null 2>&1 || true
     fi
+
     log "Truncating old logs..."
     find /var/log -type f -size +50M -name "*.log" -exec truncate -s 0 {} \; 2>/dev/null || true
-    local disk_free
-    disk_free=$(df -h / | awk 'NR==2 {print $4}')
+    
+    local disk_free=$(df -h / | awk 'NR==2 {print $4}')
     log "Cleanup finished. Free space: ${disk_free}"
 }
 
@@ -662,20 +685,18 @@ perform_aggressive_cleanup() {
 # =============================================
 
 run_enhanced_diagnostics() {
-    echo "=== SYSTEM DIAGNOSTICS (v2.9) ==="
+    echo "=== SYSTEM DIAGNOSTICS (v3.0) ==="
     echo "Time: $(date)"
     echo "Host: ${HOSTNAME_NEW} (${PUBLIC_IP})"
     
     echo -e "\n[Hardware]"
-    local cpu_model
-    cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+    local cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
     echo "CPU: ${cpu_model} ($(nproc) Cores)"
     echo "RAM: $(free -h | grep Mem | awk '{print $4}' ) free"
     
     echo -e "\n[Network]"
     echo "IPv4: ${PUBLIC_IP}"
-    local ipv6_addr
-    ipv6_addr=$(ip -6 addr show scope global | grep inet6 | head -1 | awk '{print $2}' | cut -d/ -f1)
+    local ipv6_addr=$(ip -6 addr show scope global | grep inet6 | head -1 | awk '{print $2}' | cut -d/ -f1)
     if [[ -n "${ipv6_addr}" ]]; then
         echo "IPv6: ${ipv6_addr} (Detected)"
         if ping6 -c 1 -W 2 google.com >/dev/null 2>&1; then echo "IPv6 Connectivity: OK"; else echo "IPv6 Connectivity: FAIL"; fi
@@ -692,8 +713,7 @@ run_enhanced_diagnostics() {
     
     echo -e "\n[Security]"
     if command -v fail2ban-client >/dev/null 2>&1; then echo "Fail2Ban: Installed"; else echo "Fail2Ban: Not installed"; fi
-    local ssh_keys
-    ssh_keys=$(wc -l < "${SSH_DIR}/authorized_keys" 2>/dev/null || echo "0")
+    local ssh_keys=$(wc -l < "${SSH_DIR}/authorized_keys" 2>/dev/null || echo "0")
     echo "SSH Keys: ${ssh_keys} authorized"
     
     echo "================================="
@@ -801,21 +821,27 @@ process_enhanced_args() {
         enable_tcp_bbr
         # Weekly logic
         if command -v docker >/dev/null 2>&1; then docker system prune -f >/dev/null 2>&1; fi
+        if command -v apt-get >/dev/null 2>&1; then wait_for_apt_locks; apt-get autoclean -y >/dev/null 2>&1; fi
         install_enhanced_globalping_probe
         exit 0
     fi
 
-    # Default Install
+    # Default Install - Full Verbosity Restored
     check_root
     setup_colors
     get_enhanced_system_info
+    
     install_dependencies
     update_system_packages
     configure_hostname
     setup_ssh_key
+    ubuntu_pro_attach
     configure_smart_swap
     enable_tcp_bbr
-    if [[ "$fail2ban" == "true" ]]; then install_fail2ban; fi
+    
+    if [[ "$fail2ban" == "true" ]]; then
+        install_fail2ban
+    fi
 
     install_enhanced_globalping_probe
     
@@ -840,10 +866,10 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-    systemctl daemon-reload; systemctl enable globalping-update.timer; systemctl start globalping-update.timer
+    systemctl daemon-reload; systemctl enable --now globalping-update.timer
 
-    enhanced_notify "install_success" "Installation Complete" "Setup finished successfully (v2.9)."
-    echo "✅ Installation successfully completed."
+    enhanced_notify "install_success" "Installation Complete" "Setup finished successfully (v3.0)."
+    log "✅ Installation successfully completed."
 }
 
 # =============================================
