@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.1-Bugfix"
+readonly SCRIPT_VERSION="2025.12.21-v6.2-Stable"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -46,6 +46,13 @@ DRY_RUN="false"
 GP_CPU_LIMIT="0.90"
 GP_MEM_LIMIT=""
 
+# Colors (Global Init to prevent unbound variable error)
+RED=""
+GREEN=""
+YELLOW=""
+BLUE=""
+NC=""
+
 # Detected Info
 COUNTRY=""
 HOSTNAME_NEW=""
@@ -53,7 +60,7 @@ PUBLIC_IP=""
 ASN=""
 PROVIDER=""
 OS_TYPE=""
-OS_DISTRO=""  # Explicitly initialized
+OS_DISTRO=""
 PKG_MANAGER=""
 IS_RASPBERRY_PI="false"
 
@@ -354,9 +361,9 @@ install_dependencies() {
         wait_for_apt_locks
         retry_command run_cmd apt-get update -q
         if ! run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
-             warn "Dependency install failed. Trying repair..."
-             run_cmd dpkg --configure -a || true
-             run_cmd apt-get install --fix-broken -y || true
+             warn "Dependency install failed. Attempting self-repair..."
+             dpkg --configure -a || true
+             apt-get install --fix-broken -y || true
              retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
@@ -388,7 +395,7 @@ check_critical_updates() {
         wait_for_apt_locks
         local updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" || echo "")
         if echo "$updates" | grep -qE "linux-image|systemd|libc6"; then
-             log "Critical updates found."
+             log "Critical updates (kernel/systemd) found."
              needs_reboot="true"
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
@@ -403,15 +410,11 @@ check_critical_updates() {
     fi
 }
 
-# =============================================
-# 7. SYSTEM CONFIG
-# =============================================
-
 configure_hostname() {
     log "Checking hostname..."
     if [[ -n "${HOSTNAME_NEW}" && "${HOSTNAME_NEW}" != "unknown" ]]; then
         if [[ "$(hostname)" != "${HOSTNAME_NEW}" ]]; then
-            log "Updating hostname -> ${HOSTNAME_NEW}"
+            log "Updating hostname to: ${HOSTNAME_NEW}"
             run_cmd hostname "$HOSTNAME_NEW"
             run_cmd echo "$HOSTNAME_NEW" > /etc/hostname
             if [[ "$DRY_RUN" == "false" ]]; then
@@ -426,10 +429,8 @@ setup_ssh_key() {
         log "Configuring SSH..."
         run_cmd mkdir -p "${SSH_DIR}"; run_cmd chmod 700 "${SSH_DIR}"
         if ! grep -Fq "${SSH_KEY}" "${SSH_DIR}/authorized_keys" 2>/dev/null; then
-            if [[ "$DRY_RUN" == "false" ]]; then
-                echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
-                chmod 600 "${SSH_DIR}/authorized_keys"
-            fi
+            echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
+            chmod 600 "${SSH_DIR}/authorized_keys"
             log "SSH Key added."
         fi
     fi
@@ -445,12 +446,10 @@ ubuntu_pro_attach() {
 
 optimize_for_raspberry_pi() {
     if [[ "$IS_RASPBERRY_PI" == "true" ]]; then
-        log "Optimizing for Pi..."
+        log "Applying Raspberry Pi optimizations..."
         if [[ -f /etc/dphys-swapfile ]] && ! grep -q "CONF_SWAPPINESS" /etc/dphys-swapfile; then
-            if [[ "$DRY_RUN" == "false" ]]; then
-                echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
-                systemctl restart dphys-swapfile || true
-            fi
+            echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
+            systemctl restart dphys-swapfile >/dev/null 2>&1 || true
         fi
     fi
 }
@@ -458,21 +457,20 @@ optimize_for_raspberry_pi() {
 configure_smart_swap() {
     log "Checking Swap..."
     if [[ "$IS_RASPBERRY_PI" == "true" ]]; then optimize_for_raspberry_pi; return 0; fi
-    local swap=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
-    if [[ "$swap" -gt 0 ]]; then return 0; fi
     
-    local ram=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
-    if [[ "$ram" -lt 1048576 ]]; then
-        log "Low RAM. Creating 1GB Swap..."
-        run_cmd touch /swapfile
+    local swap_total=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
+    if [[ "${swap_total}" -gt 0 ]]; then return 0; fi
+    
+    local mem_total=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
+    if [[ "${mem_total}" -lt 1048576 ]]; then
+        log "Creating 1GB Swap (Low RAM)..."
+        touch /swapfile
         if command -v chattr >/dev/null 2>&1; then run_cmd chattr +C /swapfile || true; fi
-        if [[ "$DRY_RUN" == "false" ]]; then
-            dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
-            chmod 600 /swapfile
-            mkswap /swapfile
-            swapon /swapfile
-            echo "/swapfile none swap sw 0 0" >> /etc/fstab
-        fi
+        dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null 2>&1
+        swapon /swapfile
+        echo "/swapfile none swap sw 0 0" >> /etc/fstab
     fi
 }
 
@@ -480,25 +478,20 @@ enable_tcp_bbr() {
     log "Checking TCP BBR..."
     if grep -q "bbr" /etc/sysctl.conf; then return 0; fi
     log "Enabling BBR..."
-    if [[ "$DRY_RUN" == "false" ]]; then
-        echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
-        sysctl -p >/dev/null 2>&1 || true
-    fi
+    echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+    sysctl -p >/dev/null 2>&1 || true
 }
 
 install_fail2ban() {
-    if command -v fail2ban-client >/dev/null; then return 0; fi
+    if command -v fail2ban-client >/dev/null 2>&1; then return 0; fi
     log "Installing Fail2Ban..."
-    if [[ "$OS_TYPE" == "debian" ]]; then
-        wait_for_apt_locks
-        run_cmd apt-get install -y fail2ban || true
-    elif [[ "$OS_TYPE" == "rhel" ]]; then
-        run_cmd $PKG_MANAGER install -y fail2ban || true
-    fi
-    if [[ ! -f "/etc/fail2ban/jail.local" && "$DRY_RUN" == "false" ]]; then
+    if [[ "$OS_TYPE" == "debian" ]]; then apt-get install -y fail2ban >/dev/null 2>&1 || true; fi
+    if [[ "$OS_TYPE" == "rhel" ]]; then $PKG_MANAGER install -y fail2ban >/dev/null 2>&1 || true; fi
+    
+    if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
         echo -e "[sshd]\nenabled=true\nport=ssh\nmaxretry=5\nbantime=1h" > /etc/fail2ban/jail.local
-        systemctl restart fail2ban || true
+        systemctl restart fail2ban >/dev/null 2>&1 || true
     fi
 }
 
@@ -573,7 +566,7 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.1)..."
+    log "Installing Globalping Probe (v6.2)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -649,8 +642,8 @@ perform_enhanced_auto_update() {
         if ! grep -q "END OF SCRIPT" "$temp"; then enhanced_notify "error" "Auto-Update" "Download incomplete."; return 1; fi
         if ! bash -n "$temp"; then enhanced_notify "error" "Auto-Update" "Syntax Error."; return 1; fi
         
-        local cur=$(grep "^readonly SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2)
-        local new=$(grep "^readonly SCRIPT_VERSION=" "$temp" | cut -d'"' -f2)
+        local cur=$(grep "^readonly SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2 || echo "0")
+        local new=$(grep "^readonly SCRIPT_VERSION=" "$temp" | cut -d'"' -f2 || echo "0")
         
         if [[ "$cur" != "$new" ]]; then
             log "Updating: $cur -> $new"
@@ -675,7 +668,6 @@ perform_log_rotation() {
 
 perform_aggressive_cleanup() {
     log "🧹 System Cleanup..."
-    
     local disk=$(df / | awk 'NR==2 {print $4}')
     if [[ $((disk / 1024)) -gt 2 && "$WEEKLY_MODE" == "false" ]]; then return 0; fi
 
@@ -685,6 +677,9 @@ perform_aggressive_cleanup() {
         run_cmd apt-get autoremove -y; run_cmd apt-get clean
     fi
     perform_log_rotation
+    
+    local free=$(df -h / | awk 'NR==2 {print $4}')
+    log "Cleanup done. Free: $free"
 }
 
 schedule_reboot_with_cleanup() {
@@ -721,6 +716,7 @@ WantedBy=timers.target
 EOF
     systemctl daemon-reload
     systemctl enable --now globalping-update.timer >/dev/null 2>&1
+    log "Auto-update timer active."
 }
 
 # =============================================
@@ -728,7 +724,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.1) ==="
+    echo "=== DIAGNOSTICS (v6.2) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -845,7 +841,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.1)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.2)."
     log "✅ Installation complete."
 }
 
