@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.2-Stable"
+readonly SCRIPT_VERSION="2025.12.21-v6.3-FinalFix"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -308,13 +308,48 @@ ${message}
 }
 
 # =============================================
-# 6. DETAILED INSTALLATION ROUTINES
+# 6. SYSTEM VALIDATION (RESTORED)
+# =============================================
+
+enhanced_validate_system() {
+    log "Running system validation..."
+    local errors=(); local warnings=()
+    
+    local mem_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+    local mem_mb=$((mem_kb / 1024))
+    
+    if [[ ${mem_mb} -lt ${MIN_RAM_MB} ]]; then
+        errors+=("Not enough RAM: ${mem_mb}MB (Min: ${MIN_RAM_MB}MB)")
+    elif [[ ${mem_mb} -lt 512 ]]; then
+        warnings+=("Low RAM: ${mem_mb}MB")
+    fi
+    
+    local disk_avail_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
+    local disk_avail_mb=$((disk_avail_kb / 1024))
+    
+    # 1.5GB = 1536MB
+    if [[ ${disk_avail_mb} -lt 1536 ]]; then
+         errors+=("Not enough disk space: ${disk_avail_mb}MB (Min: 1.5GB)")
+    fi
+    
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        enhanced_log "ERROR" "System requirements not met:"
+        printf '%s\n' "${errors[@]}"
+        enhanced_notify "error" "Validation Failed" "$(printf '%s\n' "${errors[@]}")"
+        return 1
+    fi
+    log "Validation passed (RAM: ${mem_mb}MB, Free Disk: ${disk_avail_mb}MB)"
+    return 0
+}
+
+# =============================================
+# 7. INSTALLATION ROUTINES
 # =============================================
 
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        OS_DISTRO="${ID}"  # FIX: Ensure OS_DISTRO is populated!
+        OS_DISTRO="${ID}"
         case "$ID" in
             debian|ubuntu|raspbian|kali) OS_TYPE="debian"; PKG_MANAGER="apt-get" ;;
             centos|rhel|fedora|rocky|almalinux) OS_TYPE="rhel"
@@ -395,7 +430,7 @@ check_critical_updates() {
         wait_for_apt_locks
         local updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" || echo "")
         if echo "$updates" | grep -qE "linux-image|systemd|libc6"; then
-             log "Critical updates (kernel/systemd) found."
+             log "Critical updates found."
              needs_reboot="true"
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
@@ -429,8 +464,10 @@ setup_ssh_key() {
         log "Configuring SSH..."
         run_cmd mkdir -p "${SSH_DIR}"; run_cmd chmod 700 "${SSH_DIR}"
         if ! grep -Fq "${SSH_KEY}" "${SSH_DIR}/authorized_keys" 2>/dev/null; then
-            echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
-            chmod 600 "${SSH_DIR}/authorized_keys"
+            if [[ "$DRY_RUN" == "false" ]]; then
+                echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
+                chmod 600 "${SSH_DIR}/authorized_keys"
+            fi
             log "SSH Key added."
         fi
     fi
@@ -448,8 +485,10 @@ optimize_for_raspberry_pi() {
     if [[ "$IS_RASPBERRY_PI" == "true" ]]; then
         log "Applying Raspberry Pi optimizations..."
         if [[ -f /etc/dphys-swapfile ]] && ! grep -q "CONF_SWAPPINESS" /etc/dphys-swapfile; then
-            echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
-            systemctl restart dphys-swapfile >/dev/null 2>&1 || true
+            if [[ "$DRY_RUN" == "false" ]]; then
+                echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
+                systemctl restart dphys-swapfile || true
+            fi
         fi
     fi
 }
@@ -457,20 +496,21 @@ optimize_for_raspberry_pi() {
 configure_smart_swap() {
     log "Checking Swap..."
     if [[ "$IS_RASPBERRY_PI" == "true" ]]; then optimize_for_raspberry_pi; return 0; fi
+    local swap=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
+    if [[ "${swap}" -gt 0 ]]; then return 0; fi
     
-    local swap_total=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
-    if [[ "${swap_total}" -gt 0 ]]; then return 0; fi
-    
-    local mem_total=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
-    if [[ "${mem_total}" -lt 1048576 ]]; then
-        log "Creating 1GB Swap (Low RAM)..."
-        touch /swapfile
+    local ram=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
+    if [[ "${ram}" -lt 1048576 ]]; then
+        log "Creating 1GB Swap..."
+        run_cmd touch /swapfile
         if command -v chattr >/dev/null 2>&1; then run_cmd chattr +C /swapfile || true; fi
-        dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
-        chmod 600 /swapfile
-        mkswap /swapfile >/dev/null 2>&1
-        swapon /swapfile
-        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+        if [[ "$DRY_RUN" == "false" ]]; then
+            dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo "/swapfile none swap sw 0 0" >> /etc/fstab
+        fi
     fi
 }
 
@@ -478,25 +518,30 @@ enable_tcp_bbr() {
     log "Checking TCP BBR..."
     if grep -q "bbr" /etc/sysctl.conf; then return 0; fi
     log "Enabling BBR..."
-    echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1 || true
+    if [[ "$DRY_RUN" == "false" ]]; then
+        echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1 || true
+    fi
 }
 
 install_fail2ban() {
     if command -v fail2ban-client >/dev/null 2>&1; then return 0; fi
     log "Installing Fail2Ban..."
-    if [[ "$OS_TYPE" == "debian" ]]; then apt-get install -y fail2ban >/dev/null 2>&1 || true; fi
-    if [[ "$OS_TYPE" == "rhel" ]]; then $PKG_MANAGER install -y fail2ban >/dev/null 2>&1 || true; fi
-    
-    if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
+    if [[ "$OS_TYPE" == "debian" ]]; then
+        wait_for_apt_locks
+        run_cmd apt-get install -y fail2ban || true
+    elif [[ "$OS_TYPE" == "rhel" ]]; then
+        run_cmd $PKG_MANAGER install -y fail2ban || true
+    fi
+    if [[ ! -f "/etc/fail2ban/jail.local" && "$DRY_RUN" == "false" ]]; then
         echo -e "[sshd]\nenabled=true\nport=ssh\nmaxretry=5\nbantime=1h" > /etc/fail2ban/jail.local
-        systemctl restart fail2ban >/dev/null 2>&1 || true
+        systemctl restart fail2ban || true
     fi
 }
 
 # =============================================
-# 8. DOCKER & CONTAINER
+# 8. DOCKER MANUAL INSTALLATION
 # =============================================
 
 install_docker_debian_ubuntu() {
@@ -566,7 +611,7 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.2)..."
+    log "Installing Globalping Probe (v6.3)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -642,8 +687,8 @@ perform_enhanced_auto_update() {
         if ! grep -q "END OF SCRIPT" "$temp"; then enhanced_notify "error" "Auto-Update" "Download incomplete."; return 1; fi
         if ! bash -n "$temp"; then enhanced_notify "error" "Auto-Update" "Syntax Error."; return 1; fi
         
-        local cur=$(grep "^readonly SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2 || echo "0")
-        local new=$(grep "^readonly SCRIPT_VERSION=" "$temp" | cut -d'"' -f2 || echo "0")
+        local cur=$(grep "^readonly SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2)
+        local new=$(grep "^readonly SCRIPT_VERSION=" "$temp" | cut -d'"' -f2)
         
         if [[ "$cur" != "$new" ]]; then
             log "Updating: $cur -> $new"
@@ -677,7 +722,6 @@ perform_aggressive_cleanup() {
         run_cmd apt-get autoremove -y; run_cmd apt-get clean
     fi
     perform_log_rotation
-    
     local free=$(df -h / | awk 'NR==2 {print $4}')
     log "Cleanup done. Free: $free"
 }
@@ -724,7 +768,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.2) ==="
+    echo "=== DIAGNOSTICS (v6.3) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -841,7 +885,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.2)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.3)."
     log "✅ Installation complete."
 }
 
