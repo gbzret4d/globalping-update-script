@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.3-FinalFix"
+readonly SCRIPT_VERSION="2025.12.21-v6.4-OOMFix"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -46,7 +46,7 @@ DRY_RUN="false"
 GP_CPU_LIMIT="0.90"
 GP_MEM_LIMIT=""
 
-# Colors (Global Init to prevent unbound variable error)
+# Colors (Global Init)
 RED=""
 GREEN=""
 YELLOW=""
@@ -308,7 +308,7 @@ ${message}
 }
 
 # =============================================
-# 6. SYSTEM VALIDATION (RESTORED)
+# 6. SYSTEM VALIDATION
 # =============================================
 
 enhanced_validate_system() {
@@ -383,7 +383,7 @@ install_dependencies() {
     enhanced_log "INFO" "Checking system dependencies..."
     local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then missing_cmds+=("${cmd}"); fi
+        if ! command -v "$cmd" >/dev/null 2>&1; then missing+=("$cmd"); fi
     done
     
     if [[ ${#missing_cmds[@]} -eq 0 ]]; then
@@ -391,7 +391,7 @@ install_dependencies() {
         return 0
     fi
     
-    log "Installing: ${missing_cmds[*]}"
+    log "Installing: ${missing[*]}"
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
         retry_command run_cmd apt-get update -q
@@ -399,10 +399,18 @@ install_dependencies() {
              warn "Dependency install failed. Attempting self-repair..."
              dpkg --configure -a || true
              apt-get install --fix-broken -y || true
-             retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
+             if ! retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
+                 err "Failed to install dependencies. Aborting."
+                 exit 1
+             fi
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
-        retry_command run_cmd $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates
+        # Try to clean up DNF to avoid OOM
+        run_cmd $PKG_MANAGER clean all || true
+        if ! retry_command run_cmd $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates; then
+             err "Failed to install dependencies (OOM?). Aborting."
+             exit 1
+        fi
     fi
 }
 
@@ -501,14 +509,18 @@ configure_smart_swap() {
     
     local ram=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
     if [[ "${ram}" -lt 1048576 ]]; then
-        log "Creating 1GB Swap..."
+        log "Low RAM. Creating 1GB Swap..."
         run_cmd touch /swapfile
         if command -v chattr >/dev/null 2>&1; then run_cmd chattr +C /swapfile || true; fi
         if [[ "$DRY_RUN" == "false" ]]; then
             dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
             chmod 600 /swapfile
             mkswap /swapfile
-            swapon /swapfile
+            if ! swapon /swapfile; then
+                warn "Failed to activate swap. (LXC/OpenVZ container?)"
+                rm /swapfile
+                return 0
+            fi
             echo "/swapfile none swap sw 0 0" >> /etc/fstab
         fi
     fi
@@ -611,7 +623,7 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.3)..."
+    log "Installing Globalping Probe (v6.4)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -682,7 +694,6 @@ install_enhanced_globalping_probe() {
 perform_enhanced_auto_update() {
     log "Checking for updates..."
     local temp="${TMP_DIR}/update.sh"
-    
     if retry_command curl -sL --connect-timeout 10 -o "$temp" "${SCRIPT_URL}"; then
         if ! grep -q "END OF SCRIPT" "$temp"; then enhanced_notify "error" "Auto-Update" "Download incomplete."; return 1; fi
         if ! bash -n "$temp"; then enhanced_notify "error" "Auto-Update" "Syntax Error."; return 1; fi
@@ -768,7 +779,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.3) ==="
+    echo "=== DIAGNOSTICS (v6.4) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -855,7 +866,7 @@ process_args() {
         exit 0
     fi
 
-    # INSTALL FLOW
+    # INSTALL FLOW - Reordered for OOM Safety
     acquire_lock
     check_root
     run_preflight_checks
@@ -866,13 +877,18 @@ process_args() {
     get_enhanced_system_info
     enhanced_validate_system
     
-    install_dependencies
+    # 1. Swap first to prevent OOM
+    configure_smart_swap
+    
+    # 2. Dependencies
+    install_dependencies || exit 1
+    
+    # 3. System Updates
     update_system_packages
     
     configure_hostname
     setup_ssh_key
     ubuntu_pro_attach
-    configure_smart_swap
     enable_tcp_bbr
     if [[ "$fail2ban" == "true" ]]; then install_fail2ban; fi
 
@@ -885,7 +901,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.3)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.4)."
     log "✅ Installation complete."
 }
 
