@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.4-OOMFix"
+readonly SCRIPT_VERSION="2025.12.21-v6.5-FinalRobust"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -274,8 +274,8 @@ enhanced_notify() {
         "install_success") icon="✅"; emoji="INSTALLATION SUCCESSFUL"; TELEGRAM_SENT="true" ;;
     esac
     
-    local ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")
-    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" used)"}' || echo "?")
+    local ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unknown")
+    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" used)"}' || echo "unknown")
     local load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | xargs || echo "?")
     
     local extended_message="${icon} ${emoji}
@@ -308,42 +308,7 @@ ${message}
 }
 
 # =============================================
-# 6. SYSTEM VALIDATION
-# =============================================
-
-enhanced_validate_system() {
-    log "Running system validation..."
-    local errors=(); local warnings=()
-    
-    local mem_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    local mem_mb=$((mem_kb / 1024))
-    
-    if [[ ${mem_mb} -lt ${MIN_RAM_MB} ]]; then
-        errors+=("Not enough RAM: ${mem_mb}MB (Min: ${MIN_RAM_MB}MB)")
-    elif [[ ${mem_mb} -lt 512 ]]; then
-        warnings+=("Low RAM: ${mem_mb}MB")
-    fi
-    
-    local disk_avail_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    local disk_avail_mb=$((disk_avail_kb / 1024))
-    
-    # 1.5GB = 1536MB
-    if [[ ${disk_avail_mb} -lt 1536 ]]; then
-         errors+=("Not enough disk space: ${disk_avail_mb}MB (Min: 1.5GB)")
-    fi
-    
-    if [[ ${#errors[@]} -gt 0 ]]; then
-        enhanced_log "ERROR" "System requirements not met:"
-        printf '%s\n' "${errors[@]}"
-        enhanced_notify "error" "Validation Failed" "$(printf '%s\n' "${errors[@]}")"
-        return 1
-    fi
-    log "Validation passed (RAM: ${mem_mb}MB, Free Disk: ${disk_avail_mb}MB)"
-    return 0
-}
-
-# =============================================
-# 7. INSTALLATION ROUTINES
+# 6. SYSTEM VALIDATION & DETECT
 # =============================================
 
 detect_os() {
@@ -366,6 +331,41 @@ detect_os() {
     fi
 }
 
+enhanced_validate_system() {
+    log "Running system validation..."
+    local errors=(); local warnings=()
+    
+    local mem_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
+    local mem_mb=$((mem_kb / 1024))
+    
+    if [[ ${mem_mb} -lt ${MIN_RAM_MB} ]]; then
+        # On VPS with small RAM, this is critical if Swap cannot be created
+        warnings+=("Low RAM: ${mem_mb}MB. Install might fail if Swap creation is blocked.")
+    elif [[ ${mem_mb} -lt 512 ]]; then
+        warnings+=("Low RAM: ${mem_mb}MB")
+    fi
+    
+    local disk_avail_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
+    local disk_avail_mb=$((disk_avail_kb / 1024))
+    
+    if [[ ${disk_avail_mb} -lt 1536 ]]; then
+         errors+=("Not enough disk space: ${disk_avail_mb}MB (Min: 1.5GB)")
+    fi
+    
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        enhanced_log "ERROR" "System requirements not met:"
+        printf '%s\n' "${errors[@]}"
+        enhanced_notify "error" "Validation Failed" "$(printf '%s\n' "${errors[@]}")"
+        return 1
+    fi
+    log "Validation passed (RAM: ${mem_mb}MB, Free Disk: ${disk_avail_mb}MB)"
+    return 0
+}
+
+# =============================================
+# 7. INSTALLATION ROUTINES
+# =============================================
+
 wait_for_apt_locks() {
     if [[ "$OS_TYPE" == "debian" && "$DRY_RUN" == "false" ]]; then
         local max=60; local i=0
@@ -383,7 +383,7 @@ install_dependencies() {
     enhanced_log "INFO" "Checking system dependencies..."
     local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then missing+=("$cmd"); fi
+        if ! command -v "$cmd" >/dev/null 2>&1; then missing_cmds+=("${cmd}"); fi
     done
     
     if [[ ${#missing_cmds[@]} -eq 0 ]]; then
@@ -391,7 +391,7 @@ install_dependencies() {
         return 0
     fi
     
-    log "Installing: ${missing[*]}"
+    log "Installing: ${missing_cmds[*]}"
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
         retry_command run_cmd apt-get update -q
@@ -399,16 +399,13 @@ install_dependencies() {
              warn "Dependency install failed. Attempting self-repair..."
              dpkg --configure -a || true
              apt-get install --fix-broken -y || true
-             if ! retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
-                 err "Failed to install dependencies. Aborting."
-                 exit 1
-             fi
+             retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
-        # Try to clean up DNF to avoid OOM
+        # OPTIMIZATION: Try to free RAM for dnf on small VPS
         run_cmd $PKG_MANAGER clean all || true
         if ! retry_command run_cmd $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates; then
-             err "Failed to install dependencies (OOM?). Aborting."
+             err "Failed to install dependencies. Possible OOM (Out Of Memory)?"
              exit 1
         fi
     fi
@@ -495,7 +492,7 @@ optimize_for_raspberry_pi() {
         if [[ -f /etc/dphys-swapfile ]] && ! grep -q "CONF_SWAPPINESS" /etc/dphys-swapfile; then
             if [[ "$DRY_RUN" == "false" ]]; then
                 echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
-                systemctl restart dphys-swapfile || true
+                systemctl restart dphys-swapfile >/dev/null 2>&1 || true
             fi
         fi
     fi
@@ -516,12 +513,14 @@ configure_smart_swap() {
             dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
             chmod 600 /swapfile
             mkswap /swapfile
-            if ! swapon /swapfile; then
-                warn "Failed to activate swap. (LXC/OpenVZ container?)"
+            # FIX: Check if swapon fails (LXC containers etc)
+            if ! swapon /swapfile 2>/dev/null; then
+                warn "Failed to activate swap. Container restriction? Proceeding without swap."
                 rm /swapfile
-                return 0
+            else
+                echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                log "Swap created."
             fi
-            echo "/swapfile none swap sw 0 0" >> /etc/fstab
         fi
     fi
 }
@@ -623,7 +622,7 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.4)..."
+    log "Installing Globalping Probe (v6.5)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -779,7 +778,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.4) ==="
+    echo "=== DIAGNOSTICS (v6.5) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -866,10 +865,9 @@ process_args() {
         exit 0
     fi
 
-    # INSTALL FLOW - Reordered for OOM Safety
+    # INSTALL FLOW
     acquire_lock
     check_root
-    run_preflight_checks
     create_temp_dir
     setup_colors
     detect_os
@@ -877,15 +875,12 @@ process_args() {
     get_enhanced_system_info
     enhanced_validate_system
     
-    # 1. Swap first to prevent OOM
+    # CRITICAL: Configure swap BEFORE installing dependencies to avoid OOM
     configure_smart_swap
     
-    # 2. Dependencies
     install_dependencies || exit 1
     
-    # 3. System Updates
     update_system_packages
-    
     configure_hostname
     setup_ssh_key
     ubuntu_pro_attach
@@ -901,7 +896,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.4)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.5)."
     log "✅ Installation complete."
 }
 
