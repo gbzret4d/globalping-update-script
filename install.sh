@@ -2,7 +2,7 @@
 set -u
 
 # =============================================
-# GLOBAL VARIABLES (COMPATIBILITY LAYER)
+# 0. COMPATIBILITY LAYER (DO NOT REMOVE)
 # =============================================
 UBUNTU_PRO_TOKEN=""
 TELEGRAM_TOKEN=""
@@ -11,9 +11,9 @@ SSH_KEY=""
 ADOPTION_TOKEN=""
 
 # =============================================
-# CONFIGURATION & CONSTANTS
+# 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v5.3-SyntaxFixed"
+readonly SCRIPT_VERSION="2025.12.21-v6.1-Bugfix"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -24,8 +24,8 @@ readonly SCRIPT_PATH="/usr/local/bin/install_globalping.sh"
 readonly SYSTEMD_TIMER_PATH="/etc/systemd/system/globalping-update.timer"
 readonly SYSTEMD_SERVICE_PATH="/etc/systemd/system/globalping-update.service"
 
-# System Requirements
-readonly MIN_FREE_SPACE_GB="1.5"
+# Constraints
+readonly MIN_FREE_SPACE_MB="500"
 readonly MIN_RAM_MB="256"
 readonly MAX_LOG_SIZE_MB="50"
 
@@ -34,7 +34,7 @@ readonly TIMEOUT_NETWORK="15"
 readonly TIMEOUT_PACKAGE="1800"
 readonly TIMEOUT_DOCKER="900"
 
-# Runtime State
+# Runtime Flags
 DEBUG_MODE="false"
 WEEKLY_MODE="false"
 REBOOT_REQUIRED="false"
@@ -53,20 +53,13 @@ PUBLIC_IP=""
 ASN=""
 PROVIDER=""
 OS_TYPE=""
+OS_DISTRO=""  # Explicitly initialized
 PKG_MANAGER=""
 IS_RASPBERRY_PI="false"
 
 # =============================================
-# 0. LOCKING & SETUP
+# 2. LOGGING & CORE HELPERS
 # =============================================
-
-acquire_lock() {
-    exec 200>"$LOCK_FILE"
-    if ! flock -n 200; then
-        echo "❌ Script is already running. Aborting."
-        exit 1
-    fi
-}
 
 setup_colors() {
     if [ -t 1 ]; then
@@ -75,17 +68,6 @@ setup_colors() {
         RED=""; GREEN=""; YELLOW=""; BLUE=""; NC=""
     fi
 }
-
-create_temp_dir() {
-    [[ -d "${TMP_DIR}" ]] && rm -rf "${TMP_DIR}"
-    mkdir -p "${TMP_DIR}" || return 1
-    chmod 700 "${TMP_DIR}"
-    trap 'rm -rf "${TMP_DIR}" 2>/dev/null || true' EXIT
-}
-
-# =============================================
-# 1. LOGGING & HELPERS
-# =============================================
 
 enhanced_log() {
     local level="$1"; local message="$2"
@@ -100,7 +82,7 @@ enhanced_log() {
         *)       prefix="📝 [${level}]"; color="${NC}" ;;
     esac
     
-    if [[ "$DRY_RUN" == "false" ]]; then
+    if [[ "$DRY_RUN" == "false" || "$level" == "ERROR" ]]; then
         mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
         echo "[${timestamp}] ${prefix} ${message}" >> "${LOG_FILE}"
     fi
@@ -111,22 +93,6 @@ log() { enhanced_log "INFO" "$1"; }
 warn() { enhanced_log "WARN" "$1"; }
 err() { enhanced_log "ERROR" "$1"; }
 
-retry_command() {
-    local retries=3; local count=0; local delay=5; local cmd="$*"
-    until "$@"; do
-        exit_code=$?
-        count=$((count + 1))
-        if [ $count -lt $retries ]; then
-            warn "Command failed ($count/$retries). Retrying in ${delay}s..."
-            sleep $delay
-        else
-            err "Command failed after $retries attempts: $cmd"
-            return $exit_code
-        fi
-    done
-    return 0
-}
-
 run_cmd() {
     if [[ "$DRY_RUN" == "true" ]]; then
         enhanced_log "DRY" "Would execute: $*"
@@ -135,30 +101,85 @@ run_cmd() {
     "$@"
 }
 
-wait_for_apt_locks() {
-    if [[ "$OS_TYPE" == "debian" ]]; then
-        local max=60; local i=0
-        while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
-              fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-            if [ $i -ge $max ]; then warn "Timeout waiting for APT locks."; break; fi
-            if [ $i -eq 0 ]; then log "Waiting for APT locks..."; fi
-            sleep 2; ((i++))
-        done
+retry_command() {
+    local retries=3; local count=0; local base_delay=5; local cmd="$*"
+    until "$@"; do
+        exit_code=$?
+        count=$((count + 1))
+        if [ $count -lt $retries ]; then
+            local wait_time=$((base_delay * (2 ** (count - 1))))
+            warn "Command failed ($count/$retries). Retrying in ${wait_time}s..."
+            if [[ "$DRY_RUN" == "false" ]]; then sleep $wait_time; fi
+        else
+            err "Command failed after $retries attempts: $cmd"
+            return $exit_code
+        fi
+    done
+    return 0
+}
+
+safe_calc() {
+    local op="$1"
+    case "${op}" in
+        "gb_from_kb") echo $(($2 / 1024 / 1024)) ;;
+        "mb_from_kb") echo $(($2 / 1024)) ;;
+        *) echo "0" ;;
+    esac
+}
+
+create_temp_dir() {
+    [[ -d "${TMP_DIR}" ]] && rm -rf "${TMP_DIR}"
+    run_cmd mkdir -p "${TMP_DIR}" || return 1
+    run_cmd chmod 700 "${TMP_DIR}"
+    if [[ "$DRY_RUN" == "false" ]]; then
+        trap 'rm -rf "${TMP_DIR}" 2>/dev/null || true' EXIT
+    fi
+}
+
+# =============================================
+# 3. SAFETY CHECKS
+# =============================================
+
+acquire_lock() {
+    if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
+    exec 200>"$LOCK_FILE"
+    if ! flock -n 200; then
+        echo "❌ Script is already running. Aborting."
+        exit 1
     fi
 }
 
 check_root() {
-    if [[ "${EUID}" -ne 0 ]]; then err "Root privileges required."; return 1; fi
+    if [[ "${EUID}" -ne 0 ]]; then err "Root required."; return 1; fi
+}
+
+run_preflight_checks() {
+    log "Running Pre-Flight Checks..."
+    if grep -q " / ro," /proc/mounts; then
+        err "CRITICAL: Root filesystem is Read-Only!"
+        return 1
+    fi
+
+    local free_space=$(df -m / | awk 'NR==2 {print $4}')
+    if [[ "$free_space" -lt "$MIN_FREE_SPACE_MB" ]]; then
+        warn "Low disk space ($free_space MB). Cleaning up..."
+        perform_aggressive_cleanup
+        free_space=$(df -m / | awk 'NR==2 {print $4}')
+        if [[ "$free_space" -lt "$MIN_FREE_SPACE_MB" ]]; then
+            err "Still insufficient space ($free_space MB). Aborting."
+            return 1
+        fi
+    fi
 }
 
 # =============================================
-# 2. CONFIG MIGRATION
+# 4. CONFIG & MIGRATION
 # =============================================
 
 load_and_migrate_config() {
     if [[ ! -d "$(dirname "${CONFIG_FILE}")" ]]; then
-        mkdir -p "$(dirname "${CONFIG_FILE}")"; chmod 700 "$(dirname "${CONFIG_FILE}")"
+        run_cmd mkdir -p "$(dirname "${CONFIG_FILE}")"
+        run_cmd chmod 700 "$(dirname "${CONFIG_FILE}")"
     fi
     if [[ -f "${CONFIG_FILE}" ]]; then source "${CONFIG_FILE}"; fi
 
@@ -181,7 +202,7 @@ load_and_migrate_config() {
         echo "GP_CPU_LIMIT=\"${GP_CPU_LIMIT}\"" >> "${CONFIG_FILE}"
     fi
 
-    if [[ "${save_needed}" == "true" ]]; then
+    if [[ "${save_needed}" == "true" && "$DRY_RUN" == "false" ]]; then
         chmod 600 "${CONFIG_FILE}"
         source "${CONFIG_FILE}"
         log "Configuration migrated."
@@ -190,6 +211,7 @@ load_and_migrate_config() {
 
 save_config_var() {
     local key="$1"; local value="$2"
+    if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
     mkdir -p "$(dirname "${CONFIG_FILE}")"
     touch "${CONFIG_FILE}"; chmod 600 "${CONFIG_FILE}"
     if grep -q "^${key}=" "${CONFIG_FILE}"; then
@@ -200,11 +222,11 @@ save_config_var() {
 }
 
 # =============================================
-# 3. SYSTEM INFO & TELEGRAM
+# 5. SYSTEM INFO & TELEGRAM
 # =============================================
 
 get_enhanced_system_info() {
-    log "Collecting system information..."
+    log "Collecting system info..."
     PUBLIC_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "unknown")
     local ipinfo=$(curl -s --connect-timeout 5 "https://ipinfo.io/json" 2>/dev/null || echo "")
     
@@ -232,6 +254,7 @@ get_enhanced_system_info() {
 enhanced_notify() {
     local level="$1"; local title="$2"; local message="$3"
     
+    if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
     if [[ "${TELEGRAM_SENT}" == "true" && "${level}" == "install_success" ]]; then return 0; fi
     if [[ "${level}" != "error" && "${level}" != "install_success" ]]; then return 0; fi
     if [[ -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT}" ]]; then return 0; fi
@@ -244,23 +267,17 @@ enhanced_notify() {
         "install_success") icon="✅"; emoji="INSTALLATION SUCCESSFUL"; TELEGRAM_SENT="true" ;;
     esac
     
-    local ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unknown")
-    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" used)"}' || echo "unknown")
-    local load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',' || echo "0")
-    local virt_type=$(systemd-detect-virt 2>/dev/null || echo "Bare Metal")
-    
-    local fail2ban_stat="Not Installed"
-    if command -v fail2ban-client >/dev/null 2>&1; then fail2ban_stat="Active"; fi
+    local ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")
+    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" used)"}' || echo "?")
+    local load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | xargs || echo "?")
     
     local extended_message="${icon} ${emoji}
 
 🌍 SERVER DETAILS:
-├─ Country: ${COUNTRY}
 ├─ Hostname: ${HOSTNAME_NEW}
 ├─ IP: ${PUBLIC_IP}
-├─ Provider: ${PROVIDER}
-├─ ASN: ${ASN}
-└─ Virtualization: ${virt_type}
+├─ ISP: ${PROVIDER}
+└─ ASN: ${ASN}
 
 💾 SYSTEM STATUS:
 ├─ RAM: ${ram_info}
@@ -268,7 +285,6 @@ enhanced_notify() {
 └─ Load: ${load_info}
 
 🔧 SERVICES:
-├─ Fail2Ban: ${fail2ban_stat}
 ├─ SSH Key: ${SSH_KEY:+Configured}${SSH_KEY:-Not set}
 └─ Ubuntu Pro: ${UBUNTU_PRO_TOKEN:+Active}${UBUNTU_PRO_TOKEN:-Not used}
 
@@ -285,47 +301,13 @@ ${message}
 }
 
 # =============================================
-# 4. SYSTEM VALIDATION
-# =============================================
-
-enhanced_validate_system() {
-    log "Running system validation..."
-    local errors=(); local warnings=()
-    
-    local mem_kb=$(grep "MemTotal" /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
-    local mem_mb=$((mem_kb / 1024))
-    
-    if [[ ${mem_mb} -lt ${MIN_RAM_MB} ]]; then
-        errors+=("Not enough RAM: ${mem_mb}MB (Min: ${MIN_RAM_MB}MB)")
-    elif [[ ${mem_mb} -lt 512 ]]; then
-        warnings+=("Low RAM: ${mem_mb}MB")
-    fi
-    
-    local disk_avail_kb=$(df / | awk 'NR==2 {print $4}' || echo "0")
-    local disk_avail_mb=$((disk_avail_kb / 1024))
-    
-    # 1.5GB = 1536MB
-    if [[ ${disk_avail_mb} -lt 1536 ]]; then
-         errors+=("Not enough disk space: ${disk_avail_mb}MB (Min: 1.5GB)")
-    fi
-    
-    if [[ ${#errors[@]} -gt 0 ]]; then
-        enhanced_log "ERROR" "System requirements not met:"
-        printf '%s\n' "${errors[@]}"
-        enhanced_notify "error" "Validation Failed" "$(printf '%s\n' "${errors[@]}")"
-        return 1
-    fi
-    log "Validation passed (RAM: ${mem_mb}MB, Free Disk: ${disk_avail_mb}MB)"
-    return 0
-}
-
-# =============================================
-# 5. INSTALLATION & SETUP
+# 6. DETAILED INSTALLATION ROUTINES
 # =============================================
 
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
+        OS_DISTRO="${ID}"  # FIX: Ensure OS_DISTRO is populated!
         case "$ID" in
             debian|ubuntu|raspbian|kali) OS_TYPE="debian"; PKG_MANAGER="apt-get" ;;
             centos|rhel|fedora|rocky|almalinux) OS_TYPE="rhel"
@@ -342,32 +324,43 @@ detect_os() {
     fi
 }
 
+wait_for_apt_locks() {
+    if [[ "$OS_TYPE" == "debian" && "$DRY_RUN" == "false" ]]; then
+        local max=60; local i=0
+        while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+              fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+            if [ $i -ge $max ]; then warn "Lock stuck. Proceeding anyway..."; break; fi
+            if [ $i -eq 0 ]; then log "Waiting for APT locks..."; fi
+            sleep 2; ((i++))
+        done
+    fi
+}
+
 install_dependencies() {
     enhanced_log "INFO" "Checking system dependencies..."
-    local missing=()
+    local missing_cmds=()
     for cmd in curl wget unzip tar gzip bc; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then missing+=("$cmd"); fi
+        if ! command -v "$cmd" >/dev/null 2>&1; then missing_cmds+=("${cmd}"); fi
     done
     
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        log "All dependencies are installed."
+    if [[ ${#missing_cmds[@]} -eq 0 ]]; then
+        log "Dependencies OK."
         return 0
     fi
     
-    log "Installing missing dependencies: ${missing[*]}"
-    
+    log "Installing: ${missing_cmds[*]}"
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
-        log "Updating package lists..."
-        retry_command apt-get update -q
-        if ! apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
-             warn "Dependency install failed. Attempting self-repair..."
-             dpkg --configure -a || true
-             apt-get install --fix-broken -y || true
-             retry_command apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
+        retry_command run_cmd apt-get update -q
+        if ! run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
+             warn "Dependency install failed. Trying repair..."
+             run_cmd dpkg --configure -a || true
+             run_cmd apt-get install --fix-broken -y || true
+             retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
-        retry_command $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates
+        retry_command run_cmd $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates
     fi
 }
 
@@ -393,32 +386,32 @@ check_critical_updates() {
 
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
-        
         local updates=$(apt list --upgradable 2>/dev/null | grep -v "WARNING" || echo "")
         if echo "$updates" | grep -qE "linux-image|systemd|libc6"; then
-             log "Critical updates (kernel/systemd) found."
+             log "Critical updates found."
              needs_reboot="true"
         fi
-        
     elif [[ "$OS_TYPE" == "rhel" ]]; then
-         if $PKG_MANAGER check-update kernel >/dev/null 2>&1; then
-             needs_reboot="true"
-         fi
+         if $PKG_MANAGER check-update kernel >/dev/null 2>&1; then needs_reboot="true"; fi
     fi
 
     if [[ -f /var/run/reboot-required ]]; then needs_reboot="true"; fi
 
     if [[ "${needs_reboot}" == "true" ]]; then
-        log "Reboot required for updates."
+        log "Reboot marker set."
         REBOOT_REQUIRED="true"
     fi
 }
+
+# =============================================
+# 7. SYSTEM CONFIG
+# =============================================
 
 configure_hostname() {
     log "Checking hostname..."
     if [[ -n "${HOSTNAME_NEW}" && "${HOSTNAME_NEW}" != "unknown" ]]; then
         if [[ "$(hostname)" != "${HOSTNAME_NEW}" ]]; then
-            log "Updating hostname to: ${HOSTNAME_NEW}"
+            log "Updating hostname -> ${HOSTNAME_NEW}"
             run_cmd hostname "$HOSTNAME_NEW"
             run_cmd echo "$HOSTNAME_NEW" > /etc/hostname
             if [[ "$DRY_RUN" == "false" ]]; then
@@ -431,10 +424,12 @@ configure_hostname() {
 setup_ssh_key() {
     if [[ -n "${SSH_KEY}" ]]; then
         log "Configuring SSH..."
-        mkdir -p "${SSH_DIR}"; chmod 700 "${SSH_DIR}"
+        run_cmd mkdir -p "${SSH_DIR}"; run_cmd chmod 700 "${SSH_DIR}"
         if ! grep -Fq "${SSH_KEY}" "${SSH_DIR}/authorized_keys" 2>/dev/null; then
-            echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
-            chmod 600 "${SSH_DIR}/authorized_keys"
+            if [[ "$DRY_RUN" == "false" ]]; then
+                echo "${SSH_KEY}" >> "${SSH_DIR}/authorized_keys"
+                chmod 600 "${SSH_DIR}/authorized_keys"
+            fi
             log "SSH Key added."
         fi
     fi
@@ -443,18 +438,19 @@ setup_ssh_key() {
 ubuntu_pro_attach() {
     if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release; then
         log "Attaching Ubuntu Pro..."
-        if ! command -v ua >/dev/null 2>&1; then apt-get install -y ubuntu-advantage-tools || true; fi
-        ua attach "${UBUNTU_PRO_TOKEN}" || true
-        ua enable esm-apps esm-infra livepatch || true
+        if ! command -v ua >/dev/null 2>&1; then run_cmd apt-get install -y ubuntu-advantage-tools || true; fi
+        run_cmd ua attach "${UBUNTU_PRO_TOKEN}" || true
     fi
 }
 
 optimize_for_raspberry_pi() {
     if [[ "$IS_RASPBERRY_PI" == "true" ]]; then
-        log "Applying Raspberry Pi optimizations..."
+        log "Optimizing for Pi..."
         if [[ -f /etc/dphys-swapfile ]] && ! grep -q "CONF_SWAPPINESS" /etc/dphys-swapfile; then
-            echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
-            systemctl restart dphys-swapfile >/dev/null 2>&1 || true
+            if [[ "$DRY_RUN" == "false" ]]; then
+                echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
+                systemctl restart dphys-swapfile || true
+            fi
         fi
     fi
 }
@@ -462,20 +458,21 @@ optimize_for_raspberry_pi() {
 configure_smart_swap() {
     log "Checking Swap..."
     if [[ "$IS_RASPBERRY_PI" == "true" ]]; then optimize_for_raspberry_pi; return 0; fi
+    local swap=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
+    if [[ "$swap" -gt 0 ]]; then return 0; fi
     
-    local swap_total=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
-    if [[ "${swap_total}" -gt 0 ]]; then return 0; fi
-    
-    local mem_total=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
-    if [[ "${mem_total}" -lt 1048576 ]]; then
-        log "Creating 1GB Swap (Low RAM)..."
-        touch /swapfile
-        if command -v chattr >/dev/null 2>&1; then chattr +C /swapfile || true; fi
-        dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
-        chmod 600 /swapfile
-        mkswap /swapfile >/dev/null 2>&1
-        swapon /swapfile
-        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+    local ram=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
+    if [[ "$ram" -lt 1048576 ]]; then
+        log "Low RAM. Creating 1GB Swap..."
+        run_cmd touch /swapfile
+        if command -v chattr >/dev/null 2>&1; then run_cmd chattr +C /swapfile || true; fi
+        if [[ "$DRY_RUN" == "false" ]]; then
+            dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo "/swapfile none swap sw 0 0" >> /etc/fstab
+        fi
     fi
 }
 
@@ -483,140 +480,147 @@ enable_tcp_bbr() {
     log "Checking TCP BBR..."
     if grep -q "bbr" /etc/sysctl.conf; then return 0; fi
     log "Enabling BBR..."
-    echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1 || true
+    if [[ "$DRY_RUN" == "false" ]]; then
+        echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1 || true
+    fi
 }
 
 install_fail2ban() {
-    if command -v fail2ban-client >/dev/null 2>&1; then return 0; fi
+    if command -v fail2ban-client >/dev/null; then return 0; fi
     log "Installing Fail2Ban..."
-    if [[ "$OS_TYPE" == "debian" ]]; then apt-get install -y fail2ban >/dev/null 2>&1 || true; fi
-    if [[ "$OS_TYPE" == "rhel" ]]; then $PKG_MANAGER install -y fail2ban >/dev/null 2>&1 || true; fi
-    
-    if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
+    if [[ "$OS_TYPE" == "debian" ]]; then
+        wait_for_apt_locks
+        run_cmd apt-get install -y fail2ban || true
+    elif [[ "$OS_TYPE" == "rhel" ]]; then
+        run_cmd $PKG_MANAGER install -y fail2ban || true
+    fi
+    if [[ ! -f "/etc/fail2ban/jail.local" && "$DRY_RUN" == "false" ]]; then
         echo -e "[sshd]\nenabled=true\nport=ssh\nmaxretry=5\nbantime=1h" > /etc/fail2ban/jail.local
-        systemctl restart fail2ban >/dev/null 2>&1 || true
+        systemctl restart fail2ban || true
     fi
 }
 
 # =============================================
-# 6. DOCKER MANUAL INSTALLATION
+# 8. DOCKER & CONTAINER
 # =============================================
 
 install_docker_debian_ubuntu() {
     local distro="$OS_DISTRO"
-    log "Manual Docker Install for $distro..."
+    if [[ -z "$distro" ]]; then
+        warn "OS_DISTRO is empty, falling back to generic install."
+        retry_command curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        run_cmd sh /tmp/get-docker.sh
+        return 0
+    fi
+
+    log "Manual Docker Install ($distro)..."
+    run_cmd apt-get remove -y docker docker-engine docker.io containerd runc || true
+    run_cmd apt-get update
+    run_cmd apt-get install -y ca-certificates curl gnupg lsb-release
     
-    apt-get remove -y docker docker-engine docker.io containerd runc >/dev/null 2>&1 || true
-    apt-get update >/dev/null 2>&1
-    apt-get install -y ca-certificates curl gnupg lsb-release
+    if [[ "$DRY_RUN" == "false" ]]; then
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/$distro/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$distro $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    fi
     
-    mkdir -p /etc/apt/keyrings
-    if [[ -f /etc/apt/keyrings/docker.gpg ]]; then rm /etc/apt/keyrings/docker.gpg; fi
-    curl -fsSL https://download.docker.com/linux/$distro/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$distro $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    apt-get update >/dev/null 2>&1
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    run_cmd apt-get update
+    run_cmd apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 }
 
 install_docker_rhel() {
-    log "Manual Docker Install for RHEL..."
-    $PKG_MANAGER remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine >/dev/null 2>&1 || true
-    $PKG_MANAGER install -y yum-utils
+    log "Manual Docker Install (RHEL)..."
+    run_cmd $PKG_MANAGER remove -y docker docker-client docker-latest docker-common docker-latest-logrotate docker-logrotate docker-engine || true
+    run_cmd $PKG_MANAGER install -y yum-utils
     
     local repo_url="https://download.docker.com/linux/centos/docker-ce.repo"
     if [[ "$OS_DISTRO" == "fedora" ]]; then repo_url="https://download.docker.com/linux/fedora/docker-ce.repo"; fi
     
-    if command -v dnf >/dev/null; then dnf config-manager --add-repo "$repo_url"; else yum-config-manager --add-repo "$repo_url"; fi
-    $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    if [[ "$DRY_RUN" == "false" ]]; then
+        if command -v dnf >/dev/null; then dnf config-manager --add-repo "$repo_url"; else yum-config-manager --add-repo "$repo_url"; fi
+    fi
+    run_cmd $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 }
 
 install_docker() {
     log "Checking Docker..."
     if command -v docker >/dev/null 2>&1; then
         if systemctl is-active docker >/dev/null 2>&1; then log "Docker active."; return 0; fi
-        systemctl start docker && return 0
+        run_cmd systemctl start docker && return 0
     fi
     
-    if [[ "$OS_TYPE" == "debian" ]]; then
-        install_docker_debian_ubuntu
-    elif [[ "$OS_TYPE" == "rhel" ]]; then
-        install_docker_rhel
+    if [[ "$OS_TYPE" == "debian" ]]; then install_docker_debian_ubuntu
+    elif [[ "$OS_TYPE" == "rhel" ]]; then install_docker_rhel
     else
-        log "Using generic installer..."
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-        sh /tmp/get-docker.sh
+        log "Generic Install..."
+        retry_command curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        run_cmd sh /tmp/get-docker.sh
     fi
-    systemctl enable --now docker
+    run_cmd systemctl enable --now docker
 }
 
 verify_docker_installation() {
     log "Verifying Docker..."
+    if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
     if ! docker version >/dev/null 2>&1; then
-        err "Docker functionality check failed!"
+        err "Docker failed verification!"
         return 1
     fi
     log "Docker OK."
 }
 
-# =============================================
-# 7. APP LOGIC (FIXED SYNTAX)
-# =============================================
-
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v5.3)..."
+    log "Installing Globalping Probe (v6.1)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
     verify_docker_installation || return 1
     
-    log "Lade Image..."
-    retry_command docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
+    log "Pulling image..."
+    retry_command run_cmd docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
     
     local cname="globalping-probe"
-    local recreate=false
+    local recreate_needed=false
     
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
-        log "Container exists. Verifying..."
+        log "Container exists. Checking..."
         local cur_tok=$(docker inspect "$cname" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
         local cur_img=$(docker inspect "$cname" --format '{{.Image}}')
         local new_img=$(docker inspect ghcr.io/jsdelivr/globalping-probe:latest --format '{{.Id}}')
         local state=$(docker inspect -f '{{.State.Status}}' "$cname")
         
-        # FIXED: Proper nested IF structure to avoid empty elif block errors
         if [[ "$cur_tok" != "$ADOPTION_TOKEN" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: Token changed."
         elif [[ "$cur_img" != "$new_img" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: New image."
         elif [[ "$state" != "running" ]]; then
-            recreate=true
-            log "Reason: Stopped."
+            recreate_needed=true
+            log "Reason: Not running."
         elif [[ "${FORCE_RECREATE}" == "true" ]]; then
-            recreate=true
+            recreate_needed=true
             log "Reason: Forced."
         else
             log "Container OK."
             return 0
         fi
     else
-        recreate=true
+        recreate_needed=true
     fi
     
-    if [[ "$recreate" == "true" ]]; then
+    if [[ "$recreate_needed}" == "true" ]]; then
         log "Recreating container..."
-        docker rm -f "$cname" >/dev/null 2>&1 || true
+        run_cmd docker rm -f "$cname" >/dev/null 2>&1 || true
         
         local limits=""
         [[ -n "${GP_CPU_LIMIT}" ]] && limits+=" --cpus=$GP_CPU_LIMIT"
         [[ -n "${GP_MEM_LIMIT}" ]] && limits+=" --memory=$GP_MEM_LIMIT"
         
-        if ! docker run -d --name "$cname" \
+        if ! run_cmd docker run -d --name "$cname" \
             --restart always --network host \
             --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
             $limits \
@@ -634,21 +638,27 @@ install_enhanced_globalping_probe() {
 }
 
 # =============================================
-# 8. UPDATER & CLEANUP
+# 9. UPDATER & CLEANUP
 # =============================================
 
 perform_enhanced_auto_update() {
     log "Checking for updates..."
     local temp="${TMP_DIR}/update.sh"
+    
     if retry_command curl -sL --connect-timeout 10 -o "$temp" "${SCRIPT_URL}"; then
-        if grep -q "END OF SCRIPT" "$temp" && bash -n "$temp"; then
-            local cur=$(grep "^readonly SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2)
-            local new=$(grep "^readonly SCRIPT_VERSION=" "$temp" | cut -d'"' -f2)
-            if [[ "$cur" != "$new" ]]; then
-                log "Updating: $cur -> $new"
-                cp "$SCRIPT_PATH" "$SCRIPT_PATH.bak"
-                cp "$temp" "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
-            fi
+        if ! grep -q "END OF SCRIPT" "$temp"; then enhanced_notify "error" "Auto-Update" "Download incomplete."; return 1; fi
+        if ! bash -n "$temp"; then enhanced_notify "error" "Auto-Update" "Syntax Error."; return 1; fi
+        
+        local cur=$(grep "^readonly SCRIPT_VERSION=" "$SCRIPT_PATH" | cut -d'"' -f2)
+        local new=$(grep "^readonly SCRIPT_VERSION=" "$temp" | cut -d'"' -f2)
+        
+        if [[ "$cur" != "$new" ]]; then
+            log "Updating: $cur -> $new"
+            run_cmd cp "$SCRIPT_PATH" "$SCRIPT_PATH.bak"
+            run_cmd cp "$temp" "$SCRIPT_PATH"; run_cmd chmod +x "$SCRIPT_PATH"
+            log "Update applied."
+        else
+            log "Script is up-to-date."
         fi
     fi
 }
@@ -656,39 +666,39 @@ perform_enhanced_auto_update() {
 perform_log_rotation() {
     if [[ ! -f "$LOG_FILE" ]]; then return 0; fi
     local size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
-    local max=$((MAX_LOG_SIZE_MB * 1024 * 1024))
-    if [[ $size -gt $max ]]; then
-        log "Rotating logs..."
-        local backup="${LOG_FILE}.$(date +%Y%m%d)"
-        mv "$LOG_FILE" "$backup"
-        touch "$LOG_FILE"
-        if command -v gzip >/dev/null; then gzip "$backup"; fi
-        find "$(dirname "$LOG_FILE")" -name "globalping-install.log.*.gz" -mtime +30 -delete
+    if [[ $size -gt $((MAX_LOG_SIZE_MB * 1024 * 1024)) ]]; then
+        log "Rotating log..."
+        run_cmd mv "$LOG_FILE" "${LOG_FILE}.old"
+        run_cmd touch "$LOG_FILE"
     fi
 }
 
 perform_aggressive_cleanup() {
     log "🧹 System Cleanup..."
+    
     local disk=$(df / | awk 'NR==2 {print $4}')
-    if [[ $((disk / 1024)) -gt 2048 && "$WEEKLY_MODE" == "false" ]]; then return 0; fi
+    if [[ $((disk / 1024)) -gt 2 && "$WEEKLY_MODE" == "false" ]]; then return 0; fi
 
-    if command -v docker >/dev/null; then docker system prune -a -f --volumes || true; fi
+    if command -v docker >/dev/null; then run_cmd docker system prune -a -f --volumes || true; fi
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
-        apt-get autoremove -y; apt-get clean
+        run_cmd apt-get autoremove -y; run_cmd apt-get clean
     fi
     perform_log_rotation
 }
 
 schedule_reboot_with_cleanup() {
     log "Scheduling Reboot..."
+    if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
+    
     local cs="/usr/local/bin/post-reboot-cleanup"
     echo -e "#!/bin/bash\n$SCRIPT_PATH --cleanup\nsystemctl disable post-reboot-cleanup" > "$cs"
     chmod +x "$cs"
-    shutdown -r +2 "Updates" &
+    shutdown -r +2 "Globalping Update Reboot" &
 }
 
 setup_auto_update_systemd() {
+    if [[ "$DRY_RUN" == "true" ]]; then return 0; fi
     cp "$0" "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
     cat > "$SYSTEMD_SERVICE_PATH" << EOF
 [Unit]
@@ -714,11 +724,11 @@ EOF
 }
 
 # =============================================
-# 9. MAIN CONTROL
+# 10. MAIN CONTROL
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v5.3) ==="
+    echo "=== DIAGNOSTICS (v6.1) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -728,11 +738,12 @@ run_diagnostics() {
 perform_uninstall() {
     if [[ "$1" != "true" ]]; then read -p "Uninstall? [y/N] " r; [[ "$r" != "y" ]] && exit 0; fi
     if command -v docker >/dev/null; then
-        docker rm -f globalping-probe || true
-        docker volume rm globalping-data || true
+        run_cmd docker stop globalping-probe || true
+        run_cmd docker rm globalping-probe || true
+        run_cmd docker volume rm globalping-data || true
     fi
-    systemctl disable --now globalping-update.timer || true
-    rm -f "$SCRIPT_PATH" "$CONFIG_FILE"
+    run_cmd systemctl disable --now globalping-update.timer || true
+    run_cmd rm -f "$SCRIPT_PATH" "$CONFIG_FILE"
     log "Uninstalled."
     exit 0
 }
@@ -745,7 +756,8 @@ show_menu() {
     echo "3. Diagnose"
     echo "4. Cleanup"
     echo "5. Uninstall"
-    echo "6. Exit"
+    echo "6. Dry Run"
+    echo "7. Exit"
     read -p "Select: " c
     case "$c" in
         1) process_args --force ;;
@@ -757,6 +769,7 @@ show_menu() {
         3) process_args --diagnose ;;
         4) process_args --cleanup ;;
         5) process_args --uninstall ;;
+        6) process_args --dry-run ;;
         *) exit 0 ;;
     esac
 }
@@ -770,6 +783,7 @@ process_args() {
             --uninstall) uninstall="true"; shift ;;
             --diagnose) diagnose="true"; shift ;;
             --cleanup) cleanup="true"; shift ;;
+            --dry-run) DRY_RUN="true"; shift ;;
             --force) force="true"; FORCE_RECREATE="true"; shift ;;
             --auto-weekly) auto="true"; WEEKLY_MODE="true"; shift ;;
             --install-fail2ban) fail2ban="true"; shift ;;
@@ -789,6 +803,7 @@ process_args() {
     if [[ "$test_tg" == "true" ]]; then enhanced_notify "install_success" "Test" "Test Message"; exit 0; fi
 
     if [[ "$auto" == "true" ]]; then
+        acquire_lock
         perform_enhanced_auto_update
         enable_tcp_bbr
         update_system_packages
@@ -803,6 +818,7 @@ process_args() {
     # INSTALL FLOW
     acquire_lock
     check_root
+    run_preflight_checks
     create_temp_dir
     setup_colors
     detect_os
@@ -829,7 +845,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v5.3)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.1)."
     log "✅ Installation complete."
 }
 
