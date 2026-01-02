@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.5-FinalRobust"
+readonly SCRIPT_VERSION="2025.12.21-v6.6-ZeroTouch"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -274,8 +274,8 @@ enhanced_notify() {
         "install_success") icon="✅"; emoji="INSTALLATION SUCCESSFUL"; TELEGRAM_SENT="true" ;;
     esac
     
-    local ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "unknown")
-    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" used)"}' || echo "unknown")
+    local ram_info=$(free -h 2>/dev/null | grep Mem | awk '{print $3"/"$2}' || echo "?")
+    local disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5" used)"}' || echo "?")
     local load_info=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | xargs || echo "?")
     
     local extended_message="${icon} ${emoji}
@@ -308,28 +308,8 @@ ${message}
 }
 
 # =============================================
-# 6. SYSTEM VALIDATION & DETECT
+# 6. SYSTEM VALIDATION
 # =============================================
-
-detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS_DISTRO="${ID}"
-        case "$ID" in
-            debian|ubuntu|raspbian|kali) OS_TYPE="debian"; PKG_MANAGER="apt-get" ;;
-            centos|rhel|fedora|rocky|almalinux) OS_TYPE="rhel"
-                if command -v dnf >/dev/null; then PKG_MANAGER="dnf"; else PKG_MANAGER="yum"; fi ;;
-            *) OS_TYPE="unknown"; PKG_MANAGER="unknown" ;;
-        esac
-    else
-        OS_TYPE="unknown"
-    fi
-    
-    if [[ -f /proc/device-tree/model ]] && grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
-        IS_RASPBERRY_PI="true"
-        log "Raspberry Pi detected."
-    fi
-}
 
 enhanced_validate_system() {
     log "Running system validation..."
@@ -339,7 +319,6 @@ enhanced_validate_system() {
     local mem_mb=$((mem_kb / 1024))
     
     if [[ ${mem_mb} -lt ${MIN_RAM_MB} ]]; then
-        # On VPS with small RAM, this is critical if Swap cannot be created
         warnings+=("Low RAM: ${mem_mb}MB. Install might fail if Swap creation is blocked.")
     elif [[ ${mem_mb} -lt 512 ]]; then
         warnings+=("Low RAM: ${mem_mb}MB")
@@ -366,6 +345,26 @@ enhanced_validate_system() {
 # 7. INSTALLATION ROUTINES
 # =============================================
 
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_DISTRO="${ID}"
+        case "$ID" in
+            debian|ubuntu|raspbian|kali) OS_TYPE="debian"; PKG_MANAGER="apt-get" ;;
+            centos|rhel|fedora|rocky|almalinux) OS_TYPE="rhel"
+                if command -v dnf >/dev/null; then PKG_MANAGER="dnf"; else PKG_MANAGER="yum"; fi ;;
+            *) OS_TYPE="unknown"; PKG_MANAGER="unknown" ;;
+        esac
+    else
+        OS_TYPE="unknown"
+    fi
+    
+    if [[ -f /proc/device-tree/model ]] && grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+        IS_RASPBERRY_PI="true"
+        log "Raspberry Pi detected."
+    fi
+}
+
 wait_for_apt_locks() {
     if [[ "$OS_TYPE" == "debian" && "$DRY_RUN" == "false" ]]; then
         local max=60; local i=0
@@ -377,6 +376,23 @@ wait_for_apt_locks() {
             sleep 2; ((i++))
         done
     fi
+}
+
+# Helper for secure apt execution (FIXED HERE)
+secure_apt_install() {
+    local packages="$*"
+    # This magic combo prevents ALL prompts
+    DEBIAN_FRONTEND=noninteractive run_cmd apt-get install -y \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" \
+        $packages
+}
+
+secure_apt_upgrade() {
+    # This magic combo prevents ALL prompts during upgrade
+    DEBIAN_FRONTEND=noninteractive run_cmd apt-get upgrade -y \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold"
 }
 
 install_dependencies() {
@@ -395,17 +411,16 @@ install_dependencies() {
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
         retry_command run_cmd apt-get update -q
-        if ! run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
+        if ! secure_apt_install curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg; then
              warn "Dependency install failed. Attempting self-repair..."
              dpkg --configure -a || true
-             apt-get install --fix-broken -y || true
-             retry_command run_cmd apt-get install -y curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
+             run_cmd apt-get install --fix-broken -y || true
+             retry_command secure_apt_install curl wget bc unzip tar gzip bzip2 xz-utils findutils iproute2 ca-certificates gnupg
         fi
     elif [[ "$OS_TYPE" == "rhel" ]]; then
-        # OPTIMIZATION: Try to free RAM for dnf on small VPS
         run_cmd $PKG_MANAGER clean all || true
         if ! retry_command run_cmd $PKG_MANAGER install -y curl wget bc unzip tar gzip bzip2 xz findutils iproute ca-certificates; then
-             err "Failed to install dependencies. Possible OOM (Out Of Memory)?"
+             err "Failed to install dependencies (OOM?). Aborting."
              exit 1
         fi
     fi
@@ -417,9 +432,9 @@ update_system_packages() {
         wait_for_apt_locks
         if apt list --upgradable 2>/dev/null | grep -q "phased"; then
              log "Phased updates detected. Safe upgrade only."
-             run_cmd apt-get upgrade -y || true
+             secure_apt_upgrade || true
         else
-             run_cmd apt-get upgrade -y || true
+             secure_apt_upgrade || true
         fi
         run_cmd apt-get autoremove -y || true
     elif [[ "$OS_TYPE" == "rhel" ]]; then
@@ -481,7 +496,7 @@ setup_ssh_key() {
 ubuntu_pro_attach() {
     if [[ -n "${UBUNTU_PRO_TOKEN}" ]] && grep -qi "ubuntu" /etc/os-release; then
         log "Attaching Ubuntu Pro..."
-        if ! command -v ua >/dev/null 2>&1; then run_cmd apt-get install -y ubuntu-advantage-tools || true; fi
+        if ! command -v ua >/dev/null 2>&1; then secure_apt_install ubuntu-advantage-tools || true; fi
         run_cmd ua attach "${UBUNTU_PRO_TOKEN}" || true
     fi
 }
@@ -492,7 +507,7 @@ optimize_for_raspberry_pi() {
         if [[ -f /etc/dphys-swapfile ]] && ! grep -q "CONF_SWAPPINESS" /etc/dphys-swapfile; then
             if [[ "$DRY_RUN" == "false" ]]; then
                 echo "CONF_SWAPPINESS=10" >> /etc/dphys-swapfile
-                systemctl restart dphys-swapfile >/dev/null 2>&1 || true
+                systemctl restart dphys-swapfile || true
             fi
         fi
     fi
@@ -513,7 +528,6 @@ configure_smart_swap() {
             dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
             chmod 600 /swapfile
             mkswap /swapfile
-            # FIX: Check if swapon fails (LXC containers etc)
             if ! swapon /swapfile 2>/dev/null; then
                 warn "Failed to activate swap. Container restriction? Proceeding without swap."
                 rm /swapfile
@@ -541,7 +555,7 @@ install_fail2ban() {
     log "Installing Fail2Ban..."
     if [[ "$OS_TYPE" == "debian" ]]; then
         wait_for_apt_locks
-        run_cmd apt-get install -y fail2ban || true
+        secure_apt_install fail2ban || true
     elif [[ "$OS_TYPE" == "rhel" ]]; then
         run_cmd $PKG_MANAGER install -y fail2ban || true
     fi
@@ -567,7 +581,7 @@ install_docker_debian_ubuntu() {
     log "Manual Docker Install ($distro)..."
     run_cmd apt-get remove -y docker docker-engine docker.io containerd runc || true
     run_cmd apt-get update
-    run_cmd apt-get install -y ca-certificates curl gnupg lsb-release
+    secure_apt_install ca-certificates curl gnupg lsb-release
     
     if [[ "$DRY_RUN" == "false" ]]; then
         mkdir -p /etc/apt/keyrings
@@ -577,7 +591,7 @@ install_docker_debian_ubuntu() {
     fi
     
     run_cmd apt-get update
-    run_cmd apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    secure_apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 }
 
 install_docker_rhel() {
@@ -622,7 +636,7 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.5)..."
+    log "Installing Globalping Probe (v6.6)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -693,6 +707,7 @@ install_enhanced_globalping_probe() {
 perform_enhanced_auto_update() {
     log "Checking for updates..."
     local temp="${TMP_DIR}/update.sh"
+    
     if retry_command curl -sL --connect-timeout 10 -o "$temp" "${SCRIPT_URL}"; then
         if ! grep -q "END OF SCRIPT" "$temp"; then enhanced_notify "error" "Auto-Update" "Download incomplete."; return 1; fi
         if ! bash -n "$temp"; then enhanced_notify "error" "Auto-Update" "Syntax Error."; return 1; fi
@@ -778,7 +793,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.5) ==="
+    echo "=== DIAGNOSTICS (v6.6) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -868,6 +883,7 @@ process_args() {
     # INSTALL FLOW
     acquire_lock
     check_root
+    run_preflight_checks
     create_temp_dir
     setup_colors
     detect_os
@@ -896,7 +912,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.5)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.6)."
     log "✅ Installation complete."
 }
 
