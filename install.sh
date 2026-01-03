@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.7-HostnameFix"
+readonly SCRIPT_VERSION="2025.12.21-v6.8-CriticalFix"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -251,7 +251,6 @@ get_enhanced_system_info() {
 
     if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
         HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
-        # FIX: Ensure Hostname is valid (max 63 chars, no trailing hyphens)
         HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | cut -c1-63 | sed 's/-$//')
     else
         HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-node")
@@ -379,7 +378,6 @@ wait_for_apt_locks() {
     fi
 }
 
-# Helper for secure apt execution
 secure_apt_install() {
     local packages="$*"
     DEBIAN_FRONTEND=noninteractive run_cmd apt-get install -y \
@@ -471,8 +469,13 @@ configure_hostname() {
             log "Updating hostname to: ${HOSTNAME_NEW}"
             run_cmd hostname "$HOSTNAME_NEW"
             run_cmd echo "$HOSTNAME_NEW" > /etc/hostname
+            
+            # FIX: Robust hosts file update to prevent 'unable to resolve'
             if [[ "$DRY_RUN" == "false" ]]; then
-                sed -i "s/^127.0.1.1.*/127.0.1.1\t${HOSTNAME_NEW}/" /etc/hosts 2>/dev/null || true
+                # Remove old 127.0.1.1 entries
+                sed -i '/^127.0.1.1/d' /etc/hosts
+                # Add new one
+                echo -e "127.0.1.1\t${HOSTNAME_NEW}" >> /etc/hosts
             fi
         fi
     fi
@@ -635,22 +638,18 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.7)..."
+    log "Installing Globalping Probe (v6.8)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
     verify_docker_installation || return 1
     
     log "Pulling image..."
-    if ! retry_command run_cmd docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
-        err "Docker pull failed!"
-        return 1
-    fi
+    retry_command run_cmd docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
     
     local cname="globalping-probe"
     local recreate_needed=false
     
-    # Check if container exists
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Checking..."
         local cur_tok=$(docker inspect "$cname" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
@@ -678,7 +677,8 @@ install_enhanced_globalping_probe() {
         recreate_needed=true
     fi
     
-    if [[ "$recreate_needed}" == "true" ]]; then
+    # CRITICAL FIX: Removed the typo '}' in the variable check below
+    if [[ "$recreate_needed" == "true" ]]; then
         log "Recreating container..."
         run_cmd docker rm -f "$cname" >/dev/null 2>&1 || true
         
@@ -700,12 +700,12 @@ install_enhanced_globalping_probe() {
         fi
         log "Probe started."
         
-        # Final Verification
+        # Post-Start Verification
         sleep 2
         if ! docker ps | grep -q "$cname"; then
-            err "Probe crashed immediately after start!"
-            docker logs "$cname" | tail -n 10
-            return 1
+             err "Probe crashed immediately!"
+             docker logs "$cname" | tail -n 5
+             return 1
         fi
     fi
     return 0
@@ -804,7 +804,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.7) ==="
+    echo "=== DIAGNOSTICS (v6.8) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -926,7 +926,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.7)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.8)."
     log "✅ Installation complete."
 }
 
