@@ -2,7 +2,7 @@
 set -u
 
 # =============================================
-# 0. COMPATIBILITY LAYER (DO NOT REMOVE)
+# 0. COMPATIBILITY LAYER
 # =============================================
 UBUNTU_PRO_TOKEN=""
 TELEGRAM_TOKEN=""
@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.8-CriticalFix"
+readonly SCRIPT_VERSION="2026.01.03-v7.0-GoldenMaster"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -160,6 +160,32 @@ check_root() {
     if [[ "${EUID}" -ne 0 ]]; then err "Root required."; return 1; fi
 }
 
+perform_log_rotation() {
+    if [[ ! -f "$LOG_FILE" ]]; then return 0; fi
+    local size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+    if [[ $size -gt $((MAX_LOG_SIZE_MB * 1024 * 1024)) ]]; then
+        log "Rotating log..."
+        run_cmd mv "$LOG_FILE" "${LOG_FILE}.old"
+        run_cmd touch "$LOG_FILE"
+    fi
+}
+
+perform_aggressive_cleanup() {
+    log "🧹 System Cleanup..."
+    local disk=$(df / | awk 'NR==2 {print $4}')
+    if [[ $((disk / 1024)) -gt 2 && "$WEEKLY_MODE" == "false" ]]; then return 0; fi
+
+    if command -v docker >/dev/null; then run_cmd docker system prune -a -f --volumes || true; fi
+    # Only try apt clean on Debian based systems
+    if [ -f /etc/debian_version ]; then
+        run_cmd apt-get autoremove -y || true
+        run_cmd apt-get clean || true
+    fi
+    perform_log_rotation
+    local free=$(df -h / | awk 'NR==2 {print $4}')
+    log "Cleanup done. Free: $free"
+}
+
 run_preflight_checks() {
     log "Running Pre-Flight Checks..."
     if grep -q " / ro," /proc/mounts; then
@@ -251,6 +277,7 @@ get_enhanced_system_info() {
 
     if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
         HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
+        # Ensure Hostname is valid (strip trailing hyphens)
         HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | cut -c1-63 | sed 's/-$//')
     else
         HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-node")
@@ -378,6 +405,7 @@ wait_for_apt_locks() {
     fi
 }
 
+# Helper for secure apt execution
 secure_apt_install() {
     local packages="$*"
     DEBIAN_FRONTEND=noninteractive run_cmd apt-get install -y \
@@ -470,11 +498,8 @@ configure_hostname() {
             run_cmd hostname "$HOSTNAME_NEW"
             run_cmd echo "$HOSTNAME_NEW" > /etc/hostname
             
-            # FIX: Robust hosts file update to prevent 'unable to resolve'
             if [[ "$DRY_RUN" == "false" ]]; then
-                # Remove old 127.0.1.1 entries
                 sed -i '/^127.0.1.1/d' /etc/hosts
-                # Add new one
                 echo -e "127.0.1.1\t${HOSTNAME_NEW}" >> /etc/hosts
             fi
         fi
@@ -638,7 +663,7 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.8)..."
+    log "Installing Globalping Probe (v7.0)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
@@ -648,7 +673,7 @@ install_enhanced_globalping_probe() {
     retry_command run_cmd docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
     
     local cname="globalping-probe"
-    local recreate_needed=false
+    local recreate_needed="false"
     
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Checking..."
@@ -658,26 +683,25 @@ install_enhanced_globalping_probe() {
         local state=$(docker inspect -f '{{.State.Status}}' "$cname")
         
         if [[ "$cur_tok" != "$ADOPTION_TOKEN" ]]; then
-            recreate_needed=true
+            recreate_needed="true"
             log "Reason: Token changed."
         elif [[ "$cur_img" != "$new_img" ]]; then
-            recreate_needed=true
+            recreate_needed="true"
             log "Reason: New image."
         elif [[ "$state" != "running" ]]; then
-            recreate_needed=true
+            recreate_needed="true"
             log "Reason: Not running."
         elif [[ "${FORCE_RECREATE}" == "true" ]]; then
-            recreate_needed=true
+            recreate_needed="true"
             log "Reason: Forced."
         else
             log "Container OK."
             return 0
         fi
     else
-        recreate_needed=true
+        recreate_needed="true"
     fi
     
-    # CRITICAL FIX: Removed the typo '}' in the variable check below
     if [[ "$recreate_needed" == "true" ]]; then
         log "Recreating container..."
         run_cmd docker rm -f "$cname" >/dev/null 2>&1 || true
@@ -700,7 +724,6 @@ install_enhanced_globalping_probe() {
         fi
         log "Probe started."
         
-        # Post-Start Verification
         sleep 2
         if ! docker ps | grep -q "$cname"; then
              err "Probe crashed immediately!"
@@ -804,7 +827,7 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.8) ==="
+    echo "=== DIAGNOSTICS (v7.0) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
@@ -926,7 +949,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.8)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v7.0)."
     log "✅ Installation complete."
 }
 
