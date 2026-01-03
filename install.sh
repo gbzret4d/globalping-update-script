@@ -13,7 +13,7 @@ ADOPTION_TOKEN=""
 # =============================================
 # 1. CONFIGURATION & CONSTANTS
 # =============================================
-readonly SCRIPT_VERSION="2025.12.21-v6.6-ZeroTouch"
+readonly SCRIPT_VERSION="2025.12.21-v6.7-HostnameFix"
 readonly CONFIG_FILE="/etc/globalping/config.env"
 readonly LOG_FILE="/var/log/globalping-install.log"
 readonly LOCK_FILE="/var/lock/globalping-manager.lock"
@@ -251,7 +251,8 @@ get_enhanced_system_info() {
 
     if [[ -n "${PUBLIC_IP}" && "${PUBLIC_IP}" != "unknown" ]]; then
         HOSTNAME_NEW="${COUNTRY,,}-${PROVIDER,,}-${ASN}-globalping-$(echo "${PUBLIC_IP}" | tr '.' '-')"
-        HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | cut -c1-63)
+        # FIX: Ensure Hostname is valid (max 63 chars, no trailing hyphens)
+        HOSTNAME_NEW=$(echo "${HOSTNAME_NEW}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | cut -c1-63 | sed 's/-$//')
     else
         HOSTNAME_NEW=$(hostname 2>/dev/null || echo "globalping-node")
     fi
@@ -378,10 +379,9 @@ wait_for_apt_locks() {
     fi
 }
 
-# Helper for secure apt execution (FIXED HERE)
+# Helper for secure apt execution
 secure_apt_install() {
     local packages="$*"
-    # This magic combo prevents ALL prompts
     DEBIAN_FRONTEND=noninteractive run_cmd apt-get install -y \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \
@@ -389,7 +389,6 @@ secure_apt_install() {
 }
 
 secure_apt_upgrade() {
-    # This magic combo prevents ALL prompts during upgrade
     DEBIAN_FRONTEND=noninteractive run_cmd apt-get upgrade -y \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold"
@@ -636,18 +635,22 @@ verify_docker_installation() {
 }
 
 install_enhanced_globalping_probe() {
-    log "Installing Globalping Probe (v6.6)..."
+    log "Installing Globalping Probe (v6.7)..."
     if [[ -z "${ADOPTION_TOKEN}" ]]; then err "Token missing!"; return 1; fi
     
     install_docker || return 1
     verify_docker_installation || return 1
     
     log "Pulling image..."
-    retry_command run_cmd docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1
+    if ! retry_command run_cmd docker pull ghcr.io/jsdelivr/globalping-probe:latest >/dev/null 2>&1; then
+        err "Docker pull failed!"
+        return 1
+    fi
     
     local cname="globalping-probe"
     local recreate_needed=false
     
+    # Check if container exists
     if docker ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
         log "Container exists. Checking..."
         local cur_tok=$(docker inspect "$cname" --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "GP_ADOPTION_TOKEN"}}{{index (split . "=") 1}}{{end}}{{end}}')
@@ -696,6 +699,14 @@ install_enhanced_globalping_probe() {
                 return 1
         fi
         log "Probe started."
+        
+        # Final Verification
+        sleep 2
+        if ! docker ps | grep -q "$cname"; then
+            err "Probe crashed immediately after start!"
+            docker logs "$cname" | tail -n 10
+            return 1
+        fi
     fi
     return 0
 }
@@ -793,10 +804,13 @@ EOF
 # =============================================
 
 run_diagnostics() {
-    echo "=== DIAGNOSTICS (v6.6) ==="
+    echo "=== DIAGNOSTICS (v6.7) ==="
     get_enhanced_system_info
     echo "Config: $CONFIG_FILE"
     echo "Docker: $(command -v docker >/dev/null && echo OK || echo NO)"
+    if command -v docker >/dev/null; then
+        docker ps --format "table {{.Names}}\t{{.Status}}"
+    fi
     exit 0
 }
 
@@ -891,7 +905,7 @@ process_args() {
     get_enhanced_system_info
     enhanced_validate_system
     
-    # CRITICAL: Configure swap BEFORE installing dependencies to avoid OOM
+    # CRITICAL: Swap first
     configure_smart_swap
     
     install_dependencies || exit 1
@@ -903,7 +917,7 @@ process_args() {
     enable_tcp_bbr
     if [[ "$fail2ban" == "true" ]]; then install_fail2ban; fi
 
-    install_enhanced_globalping_probe
+    install_enhanced_globalping_probe || exit 1
     setup_auto_update_systemd
     
     check_critical_updates
@@ -912,7 +926,7 @@ process_args() {
         if [[ "$WEEKLY_MODE" == "true" ]]; then schedule_reboot_with_cleanup; fi
     fi
 
-    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.6)."
+    enhanced_notify "install_success" "Setup Complete" "Installation successful (v6.7)."
     log "✅ Installation complete."
 }
 
